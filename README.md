@@ -69,6 +69,19 @@ cp .env.example .env
 
 `./manage.sh build|start|stop|restart|status|logs` 管理独立 Worker 容器。`stop` 会移除容器，但保留存放未确认批次的 Docker 卷。Worker 需要 `privileged`、宿主机 PID/网络命名空间和 `/sys` 读取权限；部署前应评估目标主机的安全策略。macOS 上 Docker 采集到的是 Docker Linux VM，**不会**采集 macOS 宿主机数据。
 
+### 验证 perf 火焰图
+
+在运行 Worker 的 Docker Engine 上创建一个短时 CPU 负载，再把该进程的 **Docker 主机 PID** 填到控制台的「性能剖析」页面。页面也会列出所选节点近期的 CPU 热点进程供选择。若使用 Docker Desktop，以下 PID 属于其 Linux VM，macOS 活动监视器中的 PID 不能用于 Worker 采样。
+
+```bash
+docker run -d --rm --name linux-pilot-cpu-demo --entrypoint sh linux-pilot-worker:local -c 'while :; do :; done'
+docker inspect -f '{{.State.Pid}}' linux-pilot-cpu-demo
+# 在控制台选运行该容器的 Worker 节点，填入上述 PID，采样 10～15 秒、49 Hz
+docker rm -f linux-pilot-cpu-demo
+```
+
+请在采样任务结束后再移除演示容器。`perf record` 成功但样本数为零通常表示进程在窗口内没有消耗 CPU，或进程已退出；采到事件却没有栈时，应检查目标程序的符号及帧指针。节点显示「perf 已安装」只代表命令可执行，内核权限与实际采样仍以任务结果为准。
+
 目标主机可不开放入站端口；Worker 主动连接中心服务 `50051`。跨机器部署时，把 `PO_AGENT__SERVER_URL` 改成中心端实际可达地址，`PO_AGENT__TOKEN` 必须与 Web `.env` 中的 `AGENT_TOKEN` 相同。公网或非可信网络应为 gRPC 配置 TLS。若采用原生 systemd 安装，可参考 [Worker 服务文件](worker/linux-pilot-worker.service)。
 
 生产环境可叠加 [gRPC TLS 配置示例](web/compose.prod.example.yaml)：设置 `PO_MODE=production`、`PO_PUBLIC_URL=https://实际控制台域名`、真实 SMTP 与 `GRPC_TLS_DIR` 后运行 `docker compose -f compose.yaml -f web/compose.prod.example.yaml up -d --build`。还需由部署环境的 HTTPS 反向代理保护 Web 入口。Worker 若使用自建 CA，设置 `PO_AGENT__CA_CERT_PATH=/etc/linux-pilot/ca.pem`，并在运行 `manage.sh` 时设置 `PILOT_WORKER_CA_DIR=/宿主机/证书目录`。

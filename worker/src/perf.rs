@@ -49,6 +49,16 @@ async fn run_inner(command: &ProfileCommand) -> anyhow::Result<(String, u64)> {
     {
         anyhow::bail!("perf 参数超出允许范围");
     }
+    // Worker 运行在宿主机 PID 命名空间。先检查目标是否存在，避免把输错
+    // PID 或已经退出的进程误报为“没有热点”。这里不缓存检查结果：采样期间
+    // 进程仍可能退出，后续的空样本错误会再次说明这种可能性。
+    let proc_path = format!("/proc/{}/stat", command.pid);
+    if !std::path::Path::new(&proc_path).exists() {
+        anyhow::bail!(
+            "目标 PID {} 不存在；请使用所选 Worker 节点上的进程 PID",
+            command.pid
+        );
+    }
     // 每台主机仅允许一个高开销采样任务，避免影响被观测负载。
     let _permit = PROFILE_LIMIT.acquire().await?;
     let path = std::env::temp_dir().join(format!("po-perf-{}.data", uuid::Uuid::new_v4()));
@@ -120,7 +130,17 @@ async fn run_inner(command: &ProfileCommand) -> anyhow::Result<(String, u64)> {
     }
     let sample_count = stacks.values().sum();
     if sample_count == 0 {
-        anyhow::bail!("perf 已运行，但目标进程在采样窗口内没有有效 CPU 栈");
+        if text.trim().is_empty() {
+            anyhow::bail!(
+                "perf 已运行，但 PID {} 在 {} 秒内没有 CPU 采样事件；请选当前正在消耗 CPU 的进程，或延长采样时间",
+                command.pid,
+                command.duration_s
+            );
+        }
+        anyhow::bail!(
+            "perf 已采到 PID {} 的事件，但没有可解析的调用栈；请检查目标程序的符号与帧指针，或查看 Worker 的 perf 日志",
+            command.pid
+        );
     }
     let folded = stacks
         .into_iter()

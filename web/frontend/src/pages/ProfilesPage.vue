@@ -2,22 +2,50 @@
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Activity, Play, ShieldAlert } from '@lucide/vue'
-import { request, type ProfileJob } from '../api'
+import { request, type Metric, type ProfileJob } from '../api'
 import { timestamp } from '../catalog'
 import { usePlatform } from '../store'
 
 const FlameGraph = defineAsyncComponent(() => import('../components/FlameGraph.vue'))
 const platform = usePlatform()
 const { hostId, role, selectedHost } = storeToRefs(platform)
-const pid = ref(1)
+// PID 1 往往是空闲的 init 进程，不能作为默认剖析对象。让用户从当前
+// 节点近期的 CPU 热点进程中选取，也允许手动输入其他宿主机 PID。
+const pid = ref<number | null>(null)
 const duration = ref(15)
 const frequency = ref(49)
+const processes = ref<{ pid: number; name: string; cpu: number }[]>([])
 const job = ref<ProfileJob | null>(null)
 const jobs = ref<ProfileJob[]>([])
 const busy = ref(false)
 const error = ref('')
 let timer: number | undefined
-const canStart = computed(() => (role.value === 'operator' || role.value === 'admin') && !!selectedHost.value?.online && !!selectedHost.value?.capabilities.perf)
+const canStart = computed(() => (role.value === 'operator' || role.value === 'admin') && !!selectedHost.value?.online && !!selectedHost.value?.capabilities.perf && Number.isInteger(pid.value) && Number(pid.value) > 0)
+
+async function loadProcesses() {
+  const id = hostId.value
+  processes.value = []
+  if (!id) return
+  try {
+    const now = Date.now()
+    const params = new URLSearchParams({ host_id: id, category: 'proc', from: String(now - 15_000), to: String(now), limit: '6000' })
+    const metrics = await request<Metric[]>(`/api/v1/metrics?${params}`)
+    if (id !== hostId.value) return
+    // 同一 PID 在查询窗口内有多轮采样，只取最新一次 CPU 值。旧样本会
+    // 误导用户选择已经退出或已经不再繁忙的进程。
+    const latest = new Map<number, { pid: number; name: string; cpu: number; time: number }>()
+    for (const metric of metrics) {
+      if (metric.name !== 'proc.cpu_pct') continue
+      const processId = Number(metric.labels.pid)
+      if (!Number.isInteger(processId) || processId <= 0) continue
+      const previous = latest.get(processId)
+      if (!previous || metric.time_ms > previous.time) {
+        latest.set(processId, { pid: processId, name: metric.labels.comm || `PID ${processId}`, cpu: metric.value, time: metric.time_ms })
+      }
+    }
+    processes.value = [...latest.values()].sort((a, b) => b.cpu - a.cpu).slice(0, 20)
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
+}
 const hotspots = computed(() => {
   const counts = new Map<string, number>()
   for (const line of (job.value?.folded || '').split('\n')) {
@@ -72,7 +100,7 @@ async function start() {
   finally { busy.value = false }
 }
 
-watch(hostId, loadJobs, { immediate: true })
+watch(hostId, () => { pid.value = null; void loadJobs(); void loadProcesses() }, { immediate: true })
 onMounted(() => { timer = window.setInterval(() => { if (job.value?.status === 'running') void refreshJob(); void loadJobs() }, 2500) })
 onUnmounted(() => { if (timer) window.clearInterval(timer) })
 </script>
@@ -81,8 +109,10 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
   <div class="page-stack">
     <div class="page-intro"><div><h2>性能剖析</h2><p>对指定进程执行短时 perf CPU 采样。任务由 Worker 在目标 Linux 节点运行，结果以折叠调用栈呈现。</p></div></div>
     <div v-if="error" class="notice error">{{ error }}</div>
-    <section class="panel"><div class="panel-header"><div><h3>新建 CPU 采样</h3><p>单节点同时运行一个任务；持续时间上限 60 秒</p></div><Activity :size="19" /></div>
+    <section class="panel"><div class="panel-header"><div><h3>新建 CPU 采样</h3><p>选择当前有 CPU 活动的进程；单节点同时运行一个任务，最长 60 秒</p></div><Activity :size="19" /></div>
+      <div class="profile-process-picker"><label>从近期 CPU 热点进程选择<select v-model.number="pid"><option :value="null">请选择进程，或在下方输入 PID</option><option v-for="item in processes" :key="item.pid" :value="item.pid">{{ item.name }} · PID {{ item.pid }} · CPU {{ item.cpu.toFixed(1) }}%</option></select></label><button class="button secondary" type="button" @click="loadProcesses">刷新进程</button></div>
       <div class="form-grid profile-form"><label>目标 PID<input v-model.number="pid" type="number" min="1" step="1" /></label><label>持续时间（秒）<input v-model.number="duration" type="number" min="1" max="60" step="1" /></label><label>采样频率（Hz）<input v-model.number="frequency" type="number" min="1" max="199" step="1" /></label><button class="button primary" :disabled="!canStart || busy" @click="start"><Play :size="16" /> {{ busy ? '提交中…' : '开始采样' }}</button></div>
+      <p class="secondary-text">PID 属于所选 Worker 的 Linux 主机。采样期间进程需要持续使用 CPU；空闲进程不会产生火焰图。</p>
       <div v-if="role === 'viewer'" class="inline-info"><ShieldAlert :size="16" /> 当前账号为只读，需要操作员或管理员权限才能执行 perf。</div>
       <div v-else-if="selectedHost && !selectedHost.capabilities.perf" class="inline-info"><ShieldAlert :size="16" /> 目标节点未检测到 perf 命令。命令可用仍需内核权限支持，失败原因会显示在任务结果中。</div>
     </section>

@@ -104,6 +104,9 @@ label { color: #65748a; font-size: 12px }
 .form-grid label { display: grid; gap: 6px }
 .form-grid input, .form-grid select { width: 100% }
 .profile-form { grid-template-columns: repeat(3, minmax(0, 1fr)) auto }
+.profile-process-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; margin-bottom: 12px }
+.profile-process-picker label { display: grid; gap: 6px }
+.profile-process-picker select { width: 100% }
 .alert-form { grid-template-columns: 1.1fr 1.5fr .8fr .8fr .9fr auto }
 .inline-info { display: flex; align-items: center; gap: 7px; color: #8b713e; background: #fffbf1; border: 1px solid #f7ead0; padding: 10px 12px; border-radius: 7px; font-size: 11px; margin-top: 13px }
 .notice { border-radius: 7px; padding: 11px 13px; font-size: 12px }
@@ -301,6 +304,7 @@ label { color: #65748a; font-size: 12px }
   .footer { padding: 14px 15px }
   .kpi-grid, .summary-grid.three, .category-grid, .scenario-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)) }
   .profile-form, .alert-form { grid-template-columns: repeat(2, minmax(0, 1fr)) }
+  .profile-process-picker { grid-template-columns: 1fr }
   .page-intro { display: block }
   .page-intro > :last-child { margin-top: 9px }
   .panel { padding: 16px }

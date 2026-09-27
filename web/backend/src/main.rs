@@ -12,7 +12,7 @@ mod interfaces;
 use anyhow::Context;
 use application::{
     auth::{AuthService, AuthStore, MailSender, OAuthGateway},
-    ports::{AlertRepository, MetricRepository, ProfileRepository},
+    ports::{AlertRepository, MetricRepository, ProcessRepository, ProfileRepository},
     service::Application,
 };
 use axum::Router;
@@ -32,6 +32,37 @@ pub(crate) struct AppState {
     pub auth: Arc<AuthService>,
     pub settings: Settings,
     pub streams: RwLock<HashMap<String, mpsc::Sender<linux_pilot_wire::agent::ServerFrame>>>,
+}
+
+impl AppState {
+    /// 从数据库重建节点的完整监控清单并推送给当前连接。离线时只保存
+    /// 数据库状态；Worker 重连握手后会收到同一份清单。
+    pub async fn sync_process_watches(&self, host_id: &str) -> anyhow::Result<()> {
+        use linux_pilot_wire::agent::{
+            ProcessTarget, ProcessWatchConfig, ServerFrame, server_frame::Body,
+        };
+        let watches = self.app.processes.list_watches(host_id).await?;
+        let targets = watches
+            .into_iter()
+            .filter_map(|watch| {
+                u64::try_from(watch.start_ticks)
+                    .ok()
+                    .map(|start_ticks| ProcessTarget {
+                        pid: watch.pid,
+                        start_ticks,
+                    })
+            })
+            .collect();
+        let sender = self.streams.read().await.get(host_id).cloned();
+        if let Some(sender) = sender {
+            sender
+                .send(ServerFrame {
+                    body: Some(Body::ProcessWatchConfig(ProcessWatchConfig { targets })),
+                })
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -76,10 +107,12 @@ async fn main() -> anyhow::Result<()> {
     let repository = Arc::new(infrastructure::postgres::PostgresRepository::new(db));
     let metrics: Arc<dyn MetricRepository> = repository.clone();
     let profiles: Arc<dyn ProfileRepository> = repository.clone();
+    let processes: Arc<dyn ProcessRepository> = repository.clone();
     let alerts: Arc<dyn AlertRepository> = repository;
     let app = Arc::new(Application::new(
         metrics,
         profiles,
+        processes,
         alerts,
         settings.scoring.persist_every_secs,
     ));

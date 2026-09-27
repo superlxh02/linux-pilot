@@ -46,6 +46,8 @@ const actions: Record<string, string> = {
   'auth.logout': '退出登录',
   'admin.role.update': '调整用户权限',
   'profile.start': '启动性能剖析',
+  'process.watch': '固定监控进程',
+  'process.unwatch': '取消进程监控',
   'alert.create': '创建告警规则',
   'alert.update': '修改告警规则'
 }

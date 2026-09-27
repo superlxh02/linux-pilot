@@ -19,7 +19,18 @@ message ServerFrame {
     Ack ack = 1;
     ProfileCommand profile_command = 2;
     Reject reject = 3;
+    ProcessWatchConfig process_watch_config = 4;
   }
+}
+
+// 中心端下发完整监控清单；Worker 重连时重新同步，避免配置只存在内存中。
+message ProcessWatchConfig {
+  repeated ProcessTarget targets = 1;
+}
+
+message ProcessTarget {
+  int32 pid = 1;
+  uint64 start_ticks = 2;
 }
 
 message Hello {

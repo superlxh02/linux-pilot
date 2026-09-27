@@ -4,8 +4,8 @@
 //! 指标批次写入、去重键与 ACK 的事务顺序是最关键的可靠性边界。
 
 use crate::application::ports::{
-    AlertEvent, AlertRepository, AlertRule, HostView, MetricRange, MetricRepository,
-    ProfileCompletion, ProfileJob, ProfileRepository,
+    AlertEvent, AlertRepository, AlertRule, HostView, MetricRange, MetricRepository, ProcessEntry,
+    ProcessRepository, ProcessWatch, ProfileCompletion, ProfileJob, ProfileRepository,
 };
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
@@ -146,6 +146,28 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         ))
         .await?;
     }
+    let version_five_exists = tx
+        .query_one(stmt(
+            "SELECT version FROM schema_migrations WHERE version=5",
+            std::iter::empty::<sea_orm::Value>(),
+        ))
+        .await?
+        .is_some();
+    if !version_five_exists {
+        for sql in [
+            "CREATE INDEX metrics_labels_gin ON metrics USING gin(labels jsonb_path_ops)",
+            "CREATE TABLE process_inventory (host_id TEXT NOT NULL,pid INTEGER NOT NULL,start_ticks BIGINT NOT NULL,comm TEXT NOT NULL,uid BIGINT NOT NULL,ppid INTEGER NOT NULL,state TEXT NOT NULL,command TEXT NOT NULL,cpu_pct DOUBLE PRECISION NOT NULL,rss_bytes BIGINT NOT NULL,last_seen_ms BIGINT NOT NULL,PRIMARY KEY(host_id,pid))",
+            "CREATE INDEX process_inventory_seen ON process_inventory(host_id,last_seen_ms DESC)",
+            "CREATE TABLE process_watches (host_id TEXT NOT NULL,pid INTEGER NOT NULL,start_ticks BIGINT NOT NULL,name TEXT NOT NULL,created_ms BIGINT NOT NULL,PRIMARY KEY(host_id,pid,start_ticks))",
+        ] {
+            tx.execute_unprepared(sql).await?;
+        }
+        tx.execute(stmt(
+            "INSERT INTO schema_migrations(version,applied_ms) VALUES(5,$1)",
+            [chrono::Utc::now().timestamp_millis().into()],
+        ))
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -168,9 +190,17 @@ pub async fn save_batch(
         let payload = serde_json::to_string(metrics)?;
         // jsonb_to_recordset 将整个批次一次性写入，避免每个指标产生一次数据库往返。
         tx.execute(stmt(
-            "INSERT INTO metrics(host_id,time_ms,name,value,labels,source) SELECT $1,x.time_ms,x.name,x.value,x.labels,x.source FROM jsonb_to_recordset($2::jsonb) AS x(time_ms bigint,name text,value double precision,labels jsonb,source text)",
-            [host_id.into(), payload.into()],
+            "INSERT INTO metrics(host_id,time_ms,name,value,labels,source) SELECT $1,x.time_ms,x.name,x.value,x.labels,x.source FROM jsonb_to_recordset($2::jsonb) AS x(time_ms bigint,name text,value double precision,labels jsonb,source text) WHERE x.name <> 'proc.present'",
+            [host_id.into(), payload.clone().into()],
         )).await.context("批量写入指标失败")?;
+        // 进程清单属于当前态：按 host/PID 覆盖，避免为每 15 秒的 ps
+        // 快照保留七天时序。时间条件阻止断线重放的旧批次覆盖新状态。
+        if metrics.iter().any(|metric| metric.name == "proc.present") {
+            tx.execute(stmt(
+                "INSERT INTO process_inventory(host_id,pid,start_ticks,comm,uid,ppid,state,command,cpu_pct,rss_bytes,last_seen_ms) SELECT $1,(x.labels->>'pid')::int,(x.labels->>'start_ticks')::bigint,x.labels->>'comm',(x.labels->>'uid')::bigint,(x.labels->>'ppid')::int,x.labels->>'state',x.labels->>'command',x.value,(x.labels->>'rss_bytes')::bigint,x.time_ms FROM jsonb_to_recordset($2::jsonb) AS x(time_ms bigint,name text,value double precision,labels jsonb) WHERE x.name='proc.present' ON CONFLICT(host_id,pid) DO UPDATE SET start_ticks=EXCLUDED.start_ticks,comm=EXCLUDED.comm,uid=EXCLUDED.uid,ppid=EXCLUDED.ppid,state=EXCLUDED.state,command=EXCLUDED.command,cpu_pct=EXCLUDED.cpu_pct,rss_bytes=EXCLUDED.rss_bytes,last_seen_ms=EXCLUDED.last_seen_ms WHERE process_inventory.last_seen_ms <= EXCLUDED.last_seen_ms",
+                [host_id.into(), payload.into()],
+            )).await.context("更新进程清单失败")?;
+        }
     }
     tx.commit().await?;
     Ok(inserted)
@@ -188,6 +218,12 @@ pub async fn save_score(db: &DatabaseConnection, score: &Score) -> anyhow::Resul
 
 /// 定期删除超出首版保留期的高频原始指标和批次标识。
 pub async fn retain(db: &DatabaseConnection, cutoff_ms: i64) -> anyhow::Result<()> {
+    // 当前清单保留 30 秒足够容忍一次丢包，不保存已退出进程的长期清单。
+    db.execute(stmt(
+        "DELETE FROM process_inventory WHERE last_seen_ms < $1",
+        [(chrono::Utc::now().timestamp_millis() - 30_000).into()],
+    ))
+    .await?;
     db.execute(stmt(
         "DELETE FROM metrics WHERE time_ms < $1",
         [cutoff_ms.into()],
@@ -283,16 +319,17 @@ impl MetricRepository for PostgresRepository {
 
     async fn metrics(&self, range: MetricRange<'_>) -> anyhow::Result<Vec<Metric>> {
         let prefix = range.category.map(|category| format!("{category}.%"));
+        let labels_filter = range.labels.map(serde_json::to_string).transpose()?;
         let rows = if let Some(step_ms) = range.step_ms {
             // 长窗口在数据库侧按时间桶聚合，传输量与图表点数均有界。
             self.db.query_all(stmt(
-                "SELECT name,AVG(value) AS value,((time_ms / $6::bigint) * $6::bigint) AS time_ms,'{}'::text AS labels,'rollup'::text AS source FROM metrics WHERE host_id=$1 AND time_ms BETWEEN $2 AND $3 AND ($4::text IS NULL OR name LIKE $4) AND labels='{}'::jsonb GROUP BY name,(time_ms / $6::bigint) ORDER BY time_ms DESC LIMIT $5",
-                [range.host_id.into(), range.from.into(), range.to.into(), prefix.into(), (range.limit as i64).into(), step_ms.into()],
+                "SELECT name,AVG(value) AS value,((time_ms / $6::bigint) * $6::bigint) AS time_ms,COALESCE($7::jsonb,'{}'::jsonb)::text AS labels,'rollup'::text AS source FROM metrics WHERE host_id=$1 AND time_ms BETWEEN $2 AND $3 AND ($4::text IS NULL OR name LIKE $4) AND (($7::jsonb IS NULL AND labels='{}'::jsonb) OR ($7::jsonb IS NOT NULL AND labels @> $7::jsonb)) GROUP BY name,(time_ms / $6::bigint) ORDER BY time_ms DESC LIMIT $5",
+                [range.host_id.into(), range.from.into(), range.to.into(), prefix.into(), (range.limit as i64).into(), step_ms.into(), labels_filter.into()],
             )).await?
         } else {
             self.db.query_all(stmt(
-                "SELECT name,value,time_ms,labels::text AS labels,source FROM metrics WHERE host_id=$1 AND time_ms BETWEEN $2 AND $3 AND ($4::text IS NULL OR name LIKE $4) AND (NOT $6::bool OR labels='{}'::jsonb) ORDER BY time_ms DESC LIMIT $5",
-                [range.host_id.into(), range.from.into(), range.to.into(), prefix.into(), (range.limit as i64).into(), range.aggregate_only.into()],
+                "SELECT name,value,time_ms,labels::text AS labels,source FROM metrics WHERE host_id=$1 AND time_ms BETWEEN $2 AND $3 AND ($4::text IS NULL OR name LIKE $4) AND (NOT $6::bool OR labels='{}'::jsonb) AND ($7::jsonb IS NULL OR labels @> $7::jsonb) ORDER BY time_ms DESC LIMIT $5",
+                [range.host_id.into(), range.from.into(), range.to.into(), prefix.into(), (range.limit as i64).into(), range.aggregate_only.into(), labels_filter.into()],
             )).await?
         };
         let mut values: Vec<Metric> = rows
@@ -336,6 +373,113 @@ impl MetricRepository for PostgresRepository {
 
     async fn retention(&self, cutoff_ms: i64) -> anyhow::Result<()> {
         retain(&self.db, cutoff_ms).await
+    }
+}
+
+#[async_trait]
+impl ProcessRepository for PostgresRepository {
+    async fn list_processes(
+        &self,
+        host_id: &str,
+        since_ms: i64,
+    ) -> anyhow::Result<Vec<ProcessEntry>> {
+        let rows = self.db.query_all(stmt(
+            "SELECT pid,start_ticks,comm,uid,ppid,state,command,cpu_pct,rss_bytes,last_seen_ms FROM process_inventory WHERE host_id=$1 AND last_seen_ms >= $2 ORDER BY cpu_pct DESC,pid LIMIT 1024",
+            [host_id.into(), since_ms.into()],
+        )).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProcessEntry {
+                    pid: row.try_get("", "pid")?,
+                    start_ticks: row.try_get("", "start_ticks")?,
+                    comm: row.try_get("", "comm")?,
+                    uid: row.try_get("", "uid")?,
+                    ppid: row.try_get("", "ppid")?,
+                    state: row.try_get("", "state")?,
+                    command: row.try_get("", "command")?,
+                    cpu_pct: row.try_get("", "cpu_pct")?,
+                    rss_bytes: row.try_get("", "rss_bytes")?,
+                    last_seen_ms: row.try_get("", "last_seen_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn list_watches(&self, host_id: &str) -> anyhow::Result<Vec<ProcessWatch>> {
+        let rows = self.db.query_all(stmt(
+            "SELECT host_id,pid,start_ticks,name,created_ms FROM process_watches WHERE host_id=$1 ORDER BY created_ms DESC",
+            [host_id.into()],
+        )).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProcessWatch {
+                    host_id: row.try_get("", "host_id")?,
+                    pid: row.try_get("", "pid")?,
+                    start_ticks: row.try_get("", "start_ticks")?,
+                    name: row.try_get("", "name")?,
+                    created_ms: row.try_get("", "created_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn add_watch(
+        &self,
+        host_id: &str,
+        pid: i32,
+        start_ticks: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<ProcessWatch> {
+        let tx = self.db.begin().await?;
+        // 同一节点的监控清单修改串行化，防止并发请求越过 20 项上限。
+        tx.query_one(stmt(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            [host_id.into()],
+        ))
+        .await?;
+        let count: i64 = tx
+            .query_one(stmt(
+                "SELECT COUNT(*) AS count FROM process_watches WHERE host_id=$1",
+                [host_id.into()],
+            ))
+            .await?
+            .context("读取进程监控数量失败")?
+            .try_get("", "count")?;
+        ensure!(count < 20, "单节点最多监控 20 个进程");
+        let row = tx.query_one(stmt(
+            "SELECT COALESCE(NULLIF(command,''),comm) AS name FROM process_inventory WHERE host_id=$1 AND pid=$2 AND start_ticks=$3 AND last_seen_ms >= $4",
+            [host_id.into(), pid.into(), start_ticks.into(), (now_ms - 30_000).into()],
+        )).await?.context("进程已退出或清单尚未更新，请刷新后重试")?;
+        let name: String = row.try_get("", "name")?;
+        tx.execute(stmt(
+            "INSERT INTO process_watches(host_id,pid,start_ticks,name,created_ms) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
+            [host_id.into(), pid.into(), start_ticks.into(), name.clone().into(), now_ms.into()],
+        )).await?;
+        tx.commit().await?;
+        Ok(ProcessWatch {
+            host_id: host_id.to_owned(),
+            pid,
+            start_ticks,
+            name,
+            created_ms: now_ms,
+        })
+    }
+
+    async fn remove_watch(
+        &self,
+        host_id: &str,
+        pid: i32,
+        start_ticks: i64,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .db
+            .execute(stmt(
+                "DELETE FROM process_watches WHERE host_id=$1 AND pid=$2 AND start_ticks=$3",
+                [host_id.into(), pid.into(), start_ticks.into()],
+            ))
+            .await?
+            .rows_affected()
+            > 0)
     }
 }
 

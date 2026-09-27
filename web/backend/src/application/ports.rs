@@ -31,6 +31,8 @@ pub struct MetricRange<'a> {
     pub limit: u64,
     pub aggregate_only: bool,
     pub step_ms: Option<i64>,
+    /// 可选的维度子集匹配，供挂载点、cgroup 与进程实例画历史曲线。
+    pub labels: Option<&'a BTreeMap<String, String>>,
 }
 
 #[async_trait]
@@ -68,6 +70,45 @@ pub trait MetricRepository: Send + Sync {
         to: i64,
     ) -> Result<Vec<Score>>;
     async fn retention(&self, cutoff_ms: i64) -> Result<()>;
+}
+
+/// 当前进程清单只保留最新快照；PID 与 start_ticks 一起构成进程身份，
+/// 防止服务重启或 PID 复用后把监控配置应用到另一个程序。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessEntry {
+    pub pid: i32,
+    pub start_ticks: i64,
+    pub comm: String,
+    pub uid: i64,
+    pub ppid: i32,
+    pub state: String,
+    pub command: String,
+    pub cpu_pct: f64,
+    pub rss_bytes: i64,
+    pub last_seen_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessWatch {
+    pub host_id: String,
+    pub pid: i32,
+    pub start_ticks: i64,
+    pub name: String,
+    pub created_ms: i64,
+}
+
+#[async_trait]
+pub trait ProcessRepository: Send + Sync {
+    async fn list_processes(&self, host_id: &str, since_ms: i64) -> Result<Vec<ProcessEntry>>;
+    async fn list_watches(&self, host_id: &str) -> Result<Vec<ProcessWatch>>;
+    async fn add_watch(
+        &self,
+        host_id: &str,
+        pid: i32,
+        start_ticks: i64,
+        now_ms: i64,
+    ) -> Result<ProcessWatch>;
+    async fn remove_watch(&self, host_id: &str, pid: i32, start_ticks: i64) -> Result<bool>;
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -108,6 +108,9 @@ async fn main() -> anyhow::Result<()> {
     let collector = collector::Collector::new();
     let ebpf_available = collector.ebpf_available();
     let (live_sender, live_receiver) = watch::channel(None);
+    // 持续监控的 PID 清单由中心端下发；采样循环始终只读取不可变快照，
+    // 因而 Web 增删监控任务不会等待 /proc 扫描完成。
+    let (watched_sender, watched_receiver) = watch::channel(Vec::<(i32, u64)>::new());
     // 采集与网络重连分离：中心端中断时仍每秒采样并写入本地缓冲。
     // 采样任务与连接任务独立：网络失败不应让下一秒的观测窗口消失。
     tokio::spawn(sample_loop(
@@ -116,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         spool.clone(),
         collector,
         live_receiver,
+        watched_receiver,
         settings.detail_every_secs,
     ));
     info!(%host_id, "Agent 启动");
@@ -128,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
             &hostname,
             &spool,
             &live_sender,
+            &watched_sender,
             ebpf_available,
         )
         .await
@@ -176,17 +181,22 @@ async fn sample_loop(
     spool: Arc<Mutex<spool::Spool>>,
     mut collector: collector::Collector,
     live: watch::Receiver<Option<mpsc::Sender<MetricBatch>>>,
+    watched: watch::Receiver<Vec<(i32, u64)>>,
     detail_every_secs: u64,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     let mut tick = 0_u64;
     loop {
         ticker.tick().await;
-        let mut metrics = collector.sample().await;
+        // 进程清单每 15 秒上报一次；持续监控对象仍按明细频率采集。
+        // 克隆最多 20 个 PID，避免持有 watch 读锁跨越异步采样边界。
+        let inventory_due = tick % 15 == 0;
+        let targets = watched.borrow().clone();
+        let mut metrics = collector.sample(inventory_due, &targets).await;
         // 主机汇总每秒保留；设备、网卡、CPU 核、进程和 cgroup 明细降频写库。
         // 采集器仍每秒读取计数器，速率计算不会因降频而使用过期基线。
         if tick % detail_every_secs != 0 {
-            metrics.retain(|metric| metric.labels.is_empty());
+            metrics.retain(|metric| metric.labels.is_empty() || metric.name == "proc.present");
         }
         tick = tick.wrapping_add(1);
         let now = chrono::Utc::now().timestamp_millis();
@@ -237,6 +247,7 @@ async fn connect_once(
     hostname: &str,
     spool: &Arc<Mutex<spool::Spool>>,
     live: &watch::Sender<Option<mpsc::Sender<MetricBatch>>>,
+    watched: &watch::Sender<Vec<(i32, u64)>>,
     ebpf_available: bool,
 ) -> anyhow::Result<()> {
     let mut endpoint = tonic::transport::Endpoint::from_shared(settings.server_url.clone())?
@@ -313,6 +324,12 @@ async fn connect_once(
                                 body: Some(AgentBody::ProfileResult(result))
                             }).await;
                         });
+                    }
+                    Some(ServerBody::ProcessWatchConfig(config)) => {
+                        // 消息是完整清单，直接替换旧值；start_ticks 防止 PID
+                        // 复用后把新进程误认为原先监控的服务。
+                        watched.send_replace(config.targets.into_iter()
+                            .map(|target| (target.pid, target.start_ticks)).collect());
                     }
                     None => {}
                 }

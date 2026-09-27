@@ -7,7 +7,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Metric } from '../api'
 import { formatValue, metricTitle } from '../catalog'
 
-const props = defineProps<{ points: Metric[]; names: string[]; height?: number }>()
+const props = defineProps<{ points: Metric[]; names: string[]; height?: number; labelFilter?: Record<string, string> }>()
 const element = ref<HTMLElement | null>(null)
 let chart: echarts.ECharts | null = null
 let observer: ResizeObserver | null = null
@@ -25,7 +25,9 @@ function render() {
     // 数据契约继续使用稳定的英文键；面向用户的图例、悬浮值统一走
     // 中文指标字典，避免总览图露出 cpu.busy_pct 这样的实现字段。
     tooltip: { valueFormatter: (value: unknown) => formatValue(name, Number(Array.isArray(value) ? value[1] : value)) },
-    data: props.points.filter((point) => point.name === name && !Object.keys(point.labels).length)
+    data: props.points.filter((point) => point.name === name && (props.labelFilter
+      ? Object.entries(props.labelFilter).every(([key, value]) => point.labels[key] === value)
+      : !Object.keys(point.labels).length))
       .map((point) => [point.time_ms, point.value])
   }))
   chart.setOption({

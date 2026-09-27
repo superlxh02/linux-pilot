@@ -22,6 +22,8 @@ flowchart LR
 
 Worker 每秒读取基础指标，先把批次写入持久目录，再尝试通过 gRPC 发送。网络通道有背压时，采样循环仍继续；连接恢复后按序重放未确认文件。Web 在同一数据库事务中写入指标和 `(host_id, boot_id, sequence)` 去重键，提交后才回复 ACK。无效输入会收到 Reject 并由 Worker 隔离；数据库暂时故障不回复 ACK，等待重传。磁盘缓冲有容量上限，达到上限时会丢弃最老批次并上报丢弃计数。
 
+进程清单每 15 秒通过同一可靠批次上传，在事务内更新 `process_inventory` 当前态表，不进入七天原始指标表。后端把 `process_watches` 中最多 20 个固定监控对象作为完整配置，通过双向 gRPC 流下发；Worker 重连时重新同步。每个对象绑定 PID 与 `/proc/<pid>/stat` 的启动 tick，PID 复用不会混入旧进程时序。进程详细指标仍按 Worker 明细采样频率写入常规指标表；文件系统、cgroup 和进程图表使用标签过滤并由 PostgreSQL 按时间桶聚合。
+
 ## Web 后端分层
 
 | 层 | 目录 | 责任 |

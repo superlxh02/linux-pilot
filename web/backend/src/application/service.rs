@@ -3,7 +3,8 @@
 //! 这里仅依赖领域模型和仓储端口。gRPC、HTTP 与 PostgreSQL 均在外层适配。
 
 use super::ports::{
-    AlertRepository, AlertRule, MetricRepository, ProfileCompletion, ProfileJob, ProfileRepository,
+    AlertRepository, AlertRule, MetricRepository, ProcessRepository, ProfileCompletion, ProfileJob,
+    ProfileRepository,
 };
 use anyhow::{Result, ensure};
 use linux_pilot_model::{Metric, MetricBatch, Scenario};
@@ -18,6 +19,7 @@ use tokio::sync::{RwLock, broadcast};
 pub struct Application {
     pub metrics: Arc<dyn MetricRepository>,
     pub profiles: Arc<dyn ProfileRepository>,
+    pub processes: Arc<dyn ProcessRepository>,
     pub alerts: Arc<dyn AlertRepository>,
     pub events: broadcast::Sender<String>,
     scorer: RuleBasedScoreEngine,
@@ -35,6 +37,7 @@ impl Application {
     pub fn new(
         metrics: Arc<dyn MetricRepository>,
         profiles: Arc<dyn ProfileRepository>,
+        processes: Arc<dyn ProcessRepository>,
         alerts: Arc<dyn AlertRepository>,
         persist_interval_secs: i64,
     ) -> Self {
@@ -42,6 +45,7 @@ impl Application {
         Self {
             metrics,
             profiles,
+            processes,
             alerts,
             events,
             scorer: RuleBasedScoreEngine::default(),
@@ -90,9 +94,16 @@ impl Application {
             history.retain(|metric| metric.time_ms >= now - 60_000);
             history.clone()
         };
+        // 当前态清单可通过专用 HTTP 端点分页读取，不向每个 WebSocket
+        // 客户端广播最多 1024 条进程记录，避免一台节点拖慢所有浏览器。
+        let realtime: Vec<&Metric> = batch
+            .metrics
+            .iter()
+            .filter(|metric| metric.name != "proc.present")
+            .collect();
         let _ = self.events.send(
             serde_json::json!({
-                "type": "metrics", "host_id": batch.host_id, "metrics": batch.metrics
+                "type": "metrics", "host_id": batch.host_id, "metrics": realtime
             })
             .to_string(),
         );
@@ -167,6 +178,38 @@ impl Application {
                 metric.time_ms <= now + 300_000 && metric.time_ms >= now - 7 * 86_400_000,
                 "指标时间戳超限"
             );
+            if metric.name == "proc.present" {
+                // 清单字段最终进入带整数列的当前态表；提前拒绝永久无效
+                // 的标签，避免数据库 CAST 失败后 Worker 无限重传该批次。
+                let required = [
+                    "pid",
+                    "start_ticks",
+                    "comm",
+                    "uid",
+                    "ppid",
+                    "state",
+                    "command",
+                    "rss_bytes",
+                ];
+                ensure!(
+                    required.iter().all(|key| metric.labels.contains_key(*key)),
+                    "进程清单标签缺失"
+                );
+                ensure!(
+                    metric.labels["pid"].parse::<i32>().is_ok_and(|pid| pid > 0)
+                        && metric.labels["start_ticks"]
+                            .parse::<i64>()
+                            .is_ok_and(|ticks| ticks >= 0)
+                        && metric.labels["uid"]
+                            .parse::<i64>()
+                            .is_ok_and(|uid| uid >= 0)
+                        && metric.labels["ppid"].parse::<i32>().is_ok()
+                        && metric.labels["rss_bytes"]
+                            .parse::<i64>()
+                            .is_ok_and(|bytes| bytes >= 0),
+                    "进程清单数值无效"
+                );
+            }
         }
         Ok(())
     }

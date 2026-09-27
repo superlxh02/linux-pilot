@@ -46,6 +46,13 @@ export interface ProfileJob {
   status: string; error: string | null; folded: string | null; sample_count: number | null
   created_ms: number; finished_ms: number | null
 }
+export interface ProcessEntry {
+  pid: number; start_ticks: number; comm: string; uid: number; ppid: number
+  state: string; command: string; cpu_pct: number; rss_bytes: number; last_seen_ms: number
+}
+export interface ProcessWatch {
+  host_id: string; pid: number; start_ticks: number; name: string; created_ms: number
+}
 export interface AlertRule {
   id: string; host_id: string; metric: string; comparison: string
   threshold: number; duration_s: number; enabled: boolean

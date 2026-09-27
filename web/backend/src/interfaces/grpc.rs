@@ -72,6 +72,10 @@ impl AgentTransport for AgentService {
             .write()
             .await
             .insert(hello.host_id.clone(), sender.clone());
+        if let Err(error) = self.state.sync_process_watches(&hello.host_id).await {
+            self.state.streams.write().await.remove(&hello.host_id);
+            return Err(internal(error));
+        }
         let state = self.state.clone();
         let host_id = hello.host_id;
         tokio::spawn(async move {

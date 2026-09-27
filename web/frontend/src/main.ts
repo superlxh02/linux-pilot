@@ -12,6 +12,7 @@ const router = createRouter({
     { path: '/overview', component: () => import('./pages/OverviewPage.vue') },
     { path: '/hosts', component: () => import('./pages/HostsPage.vue') },
     { path: '/metrics', component: () => import('./pages/MetricsPage.vue') },
+    { path: '/processes', component: () => import('./pages/ProcessesPage.vue') },
     { path: '/scores', component: () => import('./pages/ScoresPage.vue') },
     { path: '/profiles', component: () => import('./pages/ProfilesPage.vue') },
     { path: '/alerts', component: () => import('./pages/AlertsPage.vue') },

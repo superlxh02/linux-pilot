@@ -13,7 +13,7 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 use linux_pilot_model::Scenario;
 use linux_pilot_wire::agent::{ProfileCommand, ServerFrame, server_frame::Body};
@@ -30,6 +30,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/hosts", get(hosts))
         .route("/api/v1/hosts/{id}/overview", get(overview))
         .route("/api/v1/metrics", get(metrics))
+        .route("/api/v1/processes", get(processes))
+        .route("/api/v1/process-watches", get(process_watches))
         .route("/api/v1/scores", get(scores))
         .route("/api/v1/profiles/{id}", get(profile))
         .route("/api/v1/profiles", get(profiles))
@@ -41,6 +43,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         ));
     let write_routes = Router::new()
         .route("/api/v1/profiles", post(create_profile))
+        .route("/api/v1/process-watches", post(add_process_watch))
+        .route(
+            "/api/v1/process-watches/{host_id}/{pid}/{start_ticks}",
+            delete(remove_process_watch),
+        )
         .route("/api/v1/alerts", post(create_alert))
         .route("/api/v1/alerts/{id}", patch(update_alert))
         .route_layer(middleware::from_fn_with_state(
@@ -201,6 +208,129 @@ async fn session(
 }
 
 #[derive(Deserialize)]
+struct ProcessQuery {
+    host_id: String,
+}
+
+async fn processes(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProcessQuery>,
+) -> ApiResult<Json<Value>> {
+    if query.host_id.is_empty() || query.host_id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "主机 ID 无效".into()));
+    }
+    let rows = state
+        .app
+        .processes
+        .list_processes(
+            &query.host_id,
+            chrono::Utc::now().timestamp_millis() - 30_000,
+        )
+        .await
+        .map_err(server_error)?;
+    Ok(Json(json!(rows)))
+}
+
+async fn process_watches(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProcessQuery>,
+) -> ApiResult<Json<Value>> {
+    if query.host_id.is_empty() || query.host_id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "主机 ID 无效".into()));
+    }
+    Ok(Json(json!(
+        state
+            .app
+            .processes
+            .list_watches(&query.host_id)
+            .await
+            .map_err(server_error)?
+    )))
+}
+
+#[derive(Deserialize)]
+struct NewProcessWatch {
+    host_id: String,
+    pid: i32,
+    start_ticks: i64,
+}
+
+async fn add_process_watch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<NewProcessWatch>,
+) -> ApiResult<Json<Value>> {
+    if input.host_id.is_empty()
+        || input.host_id.len() > 128
+        || input.pid <= 0
+        || input.start_ticks < 0
+    {
+        return Err((StatusCode::BAD_REQUEST, "进程监控参数无效".into()));
+    }
+    let watch = state
+        .app
+        .processes
+        .add_watch(
+            &input.host_id,
+            input.pid,
+            input.start_ticks,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
+    if let Err(error) = state.sync_process_watches(&input.host_id).await {
+        tracing::warn!(%error, "进程监控配置已保存，等待 Worker 重连同步");
+    }
+    if let Some(actor) = current_user(&headers, &state).await {
+        state
+            .auth
+            .record_action(
+                &actor.id,
+                "process.watch",
+                &format!("{}:{}", input.host_id, input.pid),
+                json!({"start_ticks":input.start_ticks}),
+            )
+            .await
+            .map_err(server_error)?;
+    }
+    Ok(Json(json!(watch)))
+}
+
+async fn remove_process_watch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((host_id, pid, start_ticks)): Path<(String, i32, i64)>,
+) -> ApiResult<Json<Value>> {
+    if host_id.is_empty() || host_id.len() > 128 || pid <= 0 || start_ticks < 0 {
+        return Err((StatusCode::BAD_REQUEST, "进程监控参数无效".into()));
+    }
+    let removed = state
+        .app
+        .processes
+        .remove_watch(&host_id, pid, start_ticks)
+        .await
+        .map_err(server_error)?;
+    if removed {
+        if let Err(error) = state.sync_process_watches(&host_id).await {
+            tracing::warn!(%error, "进程监控配置已删除，等待 Worker 重连同步");
+        }
+        if let Some(actor) = current_user(&headers, &state).await {
+            state
+                .auth
+                .record_action(
+                    &actor.id,
+                    "process.unwatch",
+                    &format!("{host_id}:{pid}"),
+                    json!({"start_ticks":start_ticks}),
+                )
+                .await
+                .map_err(server_error)?;
+        }
+    }
+    Ok(Json(json!({"removed":removed})))
+}
+
+#[derive(Deserialize)]
 struct AdminUsersQuery {
     limit: Option<i64>,
     offset: Option<i64>,
@@ -316,6 +446,7 @@ struct MetricQuery {
     limit: Option<u64>,
     aggregate_only: Option<bool>,
     step_ms: Option<i64>,
+    labels: Option<String>,
 }
 
 async fn metrics(
@@ -350,6 +481,23 @@ async fn metrics(
     {
         return Err((StatusCode::BAD_REQUEST, "聚合粒度无效".into()));
     }
+    let labels: Option<std::collections::BTreeMap<String, String>> = query
+        .labels
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "维度过滤格式无效".into()))?;
+    if labels.as_ref().is_some_and(|labels| {
+        labels.is_empty()
+            || labels.len() > 2
+            || labels.iter().any(|(key, value)| {
+                !["mount", "cgroup", "pid", "start_ticks", "device", "iface"]
+                    .contains(&key.as_str())
+                    || value.len() > 128
+            })
+    }) {
+        return Err((StatusCode::BAD_REQUEST, "维度过滤无效".into()));
+    }
     let rows = state
         .app
         .metrics
@@ -361,6 +509,7 @@ async fn metrics(
             limit,
             aggregate_only: query.aggregate_only.unwrap_or(false),
             step_ms: query.step_ms,
+            labels: labels.as_ref(),
         })
         .await
         .map_err(server_error)?;

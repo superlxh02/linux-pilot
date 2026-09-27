@@ -97,7 +97,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
       </div>
 
       <div class="dashboard-grid">
-        <section class="panel"><div class="panel-header"><div><h3>CPU 热点进程</h3><p>最近 15 秒采集的前 20 个进程</p></div><RouterLink to="/metrics" class="text-link">探索进程 <ArrowRight :size="14" /></RouterLink></div>
+        <section class="panel"><div class="panel-header"><div><h3>CPU 热点进程</h3><p>最近 15 秒采集的前 20 个用户进程</p></div><RouterLink to="/processes" class="text-link">查看进程 <ArrowRight :size="14" /></RouterLink></div>
           <table class="data-table"><thead><tr><th>进程</th><th>PID</th><th class="align-right">CPU</th><th class="align-right">RSS</th></tr></thead><tbody><tr v-for="item in topProcesses" :key="item.pid"><td>{{ item.name }}</td><td class="mono">{{ item.pid }}</td><td class="align-right">{{ formatValue('proc.cpu_pct', item.cpu) }}</td><td class="align-right">{{ formatValue('proc.rss_bytes', item.rss) }}</td></tr><tr v-if="!topProcesses.length"><td colspan="4" class="table-empty">暂无线程/进程数据</td></tr></tbody></table>
         </section>
         <section class="panel"><div class="panel-header"><div><h3>近期告警</h3><p>当前节点最新事件</p></div><RouterLink to="/alerts" class="text-link">告警中心 <ArrowRight :size="14" /></RouterLink></div>

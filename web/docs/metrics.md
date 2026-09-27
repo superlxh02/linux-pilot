@@ -110,6 +110,9 @@
 | 指标（单位） | 意义 / 诊断用途 | 来源 |
 | --- | --- | --- |
 | `proc.cpu_pct`（% 单核） | 进程 CPU 时间增量 / 墙上时间；可超过 100%，用于找 CPU 热点。 | `/proc/<pid>/stat` 的 utime + stime |
+| `proc.user_processes`（个） | 命令行非空的用户态进程总数，不包含内核线程；用于判断清单覆盖率。 | `/proc/<pid>/cmdline` |
+| `proc.inventory_omitted`（个） | 超过单节点 1024 项进程清单上限的数量；非零时列表并非全量。 | Worker 清单扫描 |
+| `proc.present`（当前态） | 最近一次用户进程清单，值为单核 CPU 百分比；标签包含 PID、启动 tick、UID、PPID、状态、RSS、名称和可执行文件路径。只保存最新状态，不进入历史指标表；不采集命令行参数。 | `/proc/<pid>/stat`、`status`、`cmdline` |
 | `proc.user_cpu_pct`（% 单核） | 进程用户态 CPU 消耗；定位应用计算。 | 同上 |
 | `proc.system_cpu_pct`（% 单核） | 进程内核态 CPU 消耗；定位系统调用开销。 | 同上 |
 | `proc.rss_bytes`（B） | 进程实际驻留物理页大小；找内存大户。 | `/proc/<pid>/status` 的 VmRSS |

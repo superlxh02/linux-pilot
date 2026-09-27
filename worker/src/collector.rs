@@ -6,8 +6,9 @@
 
 use linux_pilot_model::Metric;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
+    io::Read,
     path::Path,
 };
 use tracing::warn;
@@ -116,7 +117,7 @@ impl Collector {
     ///
     /// 首次轮次仅输出瞬时量和状态量；累计计数器的每秒速率必须等下一轮
     /// 有真实时间差后再计算。eBPF 直方图同样按本轮窗口差分读取。
-    pub async fn sample(&mut self) -> Vec<Metric> {
+    pub async fn sample(&mut self, inventory_due: bool, watched: &[(i32, u64)]) -> Vec<Metric> {
         let now = chrono::Utc::now().timestamp_millis();
         let elapsed = self
             .last_ms
@@ -129,7 +130,7 @@ impl Collector {
         self.disks(now, elapsed, &mut out);
         self.filesystems(now, &mut out);
         self.network(now, elapsed, &mut out);
-        self.processes(now, elapsed, &mut out);
+        self.processes(now, elapsed, inventory_due, watched, &mut out);
         self.cgroups(now, elapsed, &mut out);
         if let (Some(probes), Some(seconds)) = (&mut self.ebpf, elapsed) {
             probes.sample(now, seconds, &mut out);
@@ -925,8 +926,18 @@ impl Collector {
         );
     }
 
-    /// 有界扫描进程并输出资源占用 Top N，控制高基数标签和传输体积。
-    fn processes(&mut self, now: i64, elapsed: Option<f64>, out: &mut Vec<Metric>) {
+    /// 每秒扫描用户态进程；只对 Top 20 和显式监控对象输出详细时序。
+    ///
+    /// `cmdline` 为空的内核线程不进入列表。轻量清单每 15 秒发送至服务端的
+    /// 当前态表，不进入七天的指标时序表，以控制数据库基数和存储成本。
+    fn processes(
+        &mut self,
+        now: i64,
+        elapsed: Option<f64>,
+        inventory_due: bool,
+        watched: &[(i32, u64)],
+        out: &mut Vec<Metric>,
+    ) {
         let Ok(entries) = fs::read_dir("/proc") else {
             return;
         };
@@ -935,6 +946,15 @@ impl Collector {
             let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
                 continue;
             };
+            // 内核线程没有用户态命令行；也避免把无法读取的其他用户进程
+            // 误写成一个可监控的 PID。Docker Worker 使用宿主机 PID 命名空间。
+            let Ok(mut cmdline) = fs::File::open(format!("/proc/{pid}/cmdline")) else {
+                continue;
+            };
+            let mut first = [0_u8; 1];
+            if cmdline.read(&mut first).unwrap_or(0) == 0 || first[0] == 0 {
+                continue;
+            }
             let Ok(text) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
                 continue;
             };
@@ -977,8 +997,83 @@ impl Collector {
             ));
         }
         candidates.sort_by_key(|(_, _, user, system, _, _)| std::cmp::Reverse(*user + *system));
-        for (pid, start, user_ticks, system_ticks, major_faults, block_delay) in
-            candidates.into_iter().take(20)
+        Self::plain(
+            out,
+            "proc.user_processes",
+            candidates.len() as f64,
+            now,
+            "proc",
+        );
+        if inventory_due {
+            // 清单有独立上限；超过上限时上报截断量，让页面明确显示覆盖率。
+            // 按 CPU 活动排序可以优先展示可能需要剖析的服务。
+            Self::plain(
+                out,
+                "proc.inventory_omitted",
+                candidates.len().saturating_sub(1024) as f64,
+                now,
+                "proc",
+            );
+            let hertz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+            for (pid, start, user_ticks, system_ticks, _, _) in candidates.iter().take(1024) {
+                let status = read_kv(format!("/proc/{pid}/status"), ':', 1);
+                let stat_text = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                let stat_tail = stat_text
+                    .rsplit_once(") ")
+                    .map(|(_, tail)| tail)
+                    .unwrap_or("");
+                let mut stat_fields = stat_tail.split_whitespace();
+                let state = stat_fields.next().unwrap_or("?");
+                let ppid = stat_fields.next().unwrap_or("0");
+                let command = process_argv0(*pid);
+                let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+                let labels = BTreeMap::from([
+                    ("pid".to_owned(), pid.to_string()),
+                    ("start_ticks".to_owned(), start.to_string()),
+                    ("comm".to_owned(), comm.trim().chars().take(40).collect()),
+                    (
+                        "uid".to_owned(),
+                        status.get("Uid").copied().unwrap_or(0).to_string(),
+                    ),
+                    ("ppid".to_owned(), ppid.to_owned()),
+                    ("state".to_owned(), state.to_owned()),
+                    (
+                        "rss_bytes".to_owned(),
+                        status
+                            .get("VmRSS")
+                            .copied()
+                            .unwrap_or(0)
+                            .saturating_mul(1024)
+                            .to_string(),
+                    ),
+                    ("command".to_owned(), command),
+                ]);
+                let cpu = if hertz > 0.0 {
+                    elapsed
+                        .map(|seconds| {
+                            (*user_ticks + *system_ticks) as f64 / hertz / seconds * 100.0
+                        })
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                Self::emit(out, "proc.present", cpu, now, "proc", labels);
+            }
+        }
+        let wanted: HashSet<(i32, u64)> = watched.iter().copied().collect();
+        let mut selected = HashSet::new();
+        for (pid, start, user_ticks, system_ticks, major_faults, block_delay) in candidates
+            .into_iter()
+            .enumerate()
+            .filter_map(|(rank, item)| {
+                if (rank < 20 || wanted.contains(&(item.0, item.1)))
+                    && selected.insert((item.0, item.1))
+                {
+                    Some(item)
+                } else {
+                    None
+                }
+            })
         {
             let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
                 .unwrap_or_default()
@@ -1304,6 +1399,30 @@ impl Collector {
             "agent",
         );
     }
+}
+
+/// 只读取 argv[0]，避免把命令行参数中的密码、令牌或连接串写入中心端。
+/// 截断到 120 字节，满足指标标签的 128 字节上限；非 UTF-8 字节做有损转换。
+fn process_argv0(pid: i32) -> String {
+    let Ok(file) = fs::File::open(format!("/proc/{pid}/cmdline")) else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    if file.take(120).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    let mut command: String = String::from_utf8_lossy(&bytes[..end])
+        .chars()
+        .take(40)
+        .collect();
+    while command.len() > 120 {
+        command.pop();
+    }
+    command
 }
 
 /// 读取 proc/cgroup 的简单键值文件；字段缺失时自然降级。

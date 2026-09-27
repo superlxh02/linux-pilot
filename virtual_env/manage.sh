@@ -38,10 +38,18 @@ case "${1:-}" in
   up)
     command -v kind >/dev/null
     docker info >/dev/null
+    # 首次运行必须先生成口令，再启动 Compose。否则中心端会读到默认
+    # AGENT_TOKEN，而稍后创建的 Kubernetes Secret 已是随机新值。
+    [[ -f "$root/.env" ]] || "$root/web/scripts/init-env.sh"
+    for key in AGENT_TOKEN OPERATOR_TOKEN; do
+      if [[ -z "$(token_from_env "$key")" ]]; then
+        echo ".env 缺少 $key" >&2; exit 1
+      fi
+    done
     if ! kind get clusters | grep -qx "$name"; then
       kind create cluster --name "$name" --config "$root/virtual_env/kind.yaml" --wait 5m
     fi
-    docker compose -f "$root/compose.yaml" up -d --build
+    docker compose --env-file "$root/.env" -f "$root/compose.yaml" up -d --build
     docker build -t linux-pilot-demo:local "$root/virtual_env/services"
     docker build -t linux-pilot-worker:local "$root/worker"
     kind load docker-image linux-pilot-demo:local linux-pilot-worker:local --name "$name"

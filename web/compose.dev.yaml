@@ -1,0 +1,7 @@
+# 本地邮件测试叠加文件；常规 Compose 只部署 Web 前后端和数据库。
+services:
+  mailpit:
+    image: axllent/mailpit:v1.31.1
+    ports:
+      - "127.0.0.1:8025:8025"
+    restart: unless-stopped

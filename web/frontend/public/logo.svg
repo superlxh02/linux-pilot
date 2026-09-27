@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Linux-Pilot</title>
+  <desc id="desc">指南针指向上方，底部是系统性能脉冲线</desc>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#eef5ff" stroke="#c9dcf8" stroke-width="2"/>
+  <path d="M18 34a14 14 0 0 1 14-14" fill="none" stroke="#a8c5f3" stroke-width="3" stroke-linecap="round"/>
+  <path d="m31 32 18-18-5 20-7-7z" fill="#2563eb" stroke="#154bb8" stroke-width="1.5" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="3" fill="#fff" stroke="#2563eb" stroke-width="2"/>
+  <path d="M13 45h10l4-7 5 12 5-9 3 4h11" fill="none" stroke="#0b9f94" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,79 @@
+syntax = "proto3";
+package po.agent.v1;
+
+service AgentTransport {
+  rpc Exchange(stream AgentFrame) returns (stream ServerFrame);
+}
+
+message AgentFrame {
+  oneof body {
+    Hello hello = 1;
+    MetricBatch batch = 2;
+    Heartbeat heartbeat = 3;
+    ProfileResult profile_result = 4;
+  }
+}
+
+message ServerFrame {
+  oneof body {
+    Ack ack = 1;
+    ProfileCommand profile_command = 2;
+    Reject reject = 3;
+  }
+}
+
+message Hello {
+  string host_id = 1;
+  string boot_id = 2;
+  string token = 3;
+  string hostname = 4;
+  bool ebpf = 5;
+  bool perf = 6;
+  bool cgroup_v2 = 7;
+}
+
+message MetricBatch {
+  string host_id = 1;
+  string boot_id = 2;
+  uint64 sequence = 3;
+  repeated Metric metrics = 4;
+}
+
+message Metric {
+  string name = 1;
+  double value = 2;
+  int64 time_ms = 3;
+  map<string, string> labels = 4;
+  string source = 5;
+}
+
+message Heartbeat {
+  string host_id = 1;
+  int64 time_ms = 2;
+}
+
+message Ack {
+  uint64 sequence = 1;
+}
+
+// 永久无效的数据不会因断线重传而变成有效，Worker 应隔离并继续发送后续批次。
+message Reject {
+  uint64 sequence = 1;
+  string reason = 2;
+}
+
+message ProfileCommand {
+  string job_id = 1;
+  int32 pid = 2;
+  uint32 duration_s = 3;
+  uint32 frequency_hz = 4;
+}
+
+message ProfileResult {
+  string job_id = 1;
+  string host_id = 2;
+  bool success = 3;
+  string error = 4;
+  string folded_stacks = 5;
+  uint64 sample_count = 6;
+}

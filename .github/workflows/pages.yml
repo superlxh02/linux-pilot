@@ -1,0 +1,40 @@
+name: Publish Linux-Pilot site
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'web/site/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/configure-pages@v5
+      - name: Set repository link
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: printf 'window.LINUX_PILOT_REPOSITORY = "https://github.com/%s";\n' "$REPOSITORY" > web/site/repository.js
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: web/site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

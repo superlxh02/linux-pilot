@@ -1,0 +1,41 @@
+# 按 Spring Boot 风格组织配置；配置值可用 PO__... 环境变量覆盖。
+# 文件名沿用项目要求的 appliaction.yaml，生产部署可用 PO_CONFIG 指向自有文件。
+app:
+  mode: local
+server:
+  http_addr: 0.0.0.0:8080
+  grpc_addr: 0.0.0.0:50051
+database:
+  url: postgres://po:local-dev-password@127.0.0.1:5432/po
+  max_connections: 20
+auth:
+  viewer_token: change-me-viewer
+  operator_token: change-me-operator
+  # GitHub/Google 授权回调必须以此地址为根；与提供方控制台登记的地址完全一致。
+  # 本地邮件测试请使用 web/compose.dev.yaml；生产改为 TLS SMTP。
+  public_url: http://localhost:3000
+  # 固定初始密码；公开仓库里的值只适合本地体验，正式部署可用 ADMIN_PASSWORD 覆盖。
+  admin_password: admin-5a2c966a29f39ec1248ae6ba480ae765158d26fef745e139
+  code_pepper: change-me-code-pepper
+  session_days: 7
+  mail:
+    host: mailpit
+    port: 1025
+    username: ""
+    password: ""
+    from: "Linux-Pilot <no-reply@linux-pilot.local>"
+    security: none
+  github:
+    # 未填写时按钮灰显；Client ID 和 Secret 必须同时设置。
+    client_id: ""
+    client_secret: ""
+  google:
+    # Google OAuth 客户端类型使用 Web application。
+    client_id: ""
+    client_secret: ""
+worker:
+  token: change-me-agent
+retention:
+  days: 7
+scoring:
+  persist_every_secs: 10

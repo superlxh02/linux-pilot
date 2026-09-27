@@ -1,0 +1,9 @@
+/target
+/target-linux
+/worker/target
+/web/target
+/worker/.env
+/web/frontend/node_modules
+/web/frontend/dist
+/.env
+/web/backend/certs

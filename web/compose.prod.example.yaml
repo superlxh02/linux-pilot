@@ -1,0 +1,10 @@
+# 生产部署示例叠加文件。先由外部 HTTPS 反向代理保护 Web 入口，
+# 并在 .env 中提供真实 SMTP、OAuth 凭据与互不相同的随机令牌。
+services:
+  backend:
+    environment:
+      PO__APP__MODE: production
+      PO__SERVER__TLS_CERT_PATH: /etc/linux-pilot/tls/server.crt
+      PO__SERVER__TLS_KEY_PATH: /etc/linux-pilot/tls/server.key
+    volumes:
+      - ${GRPC_TLS_DIR:?请设置宿主机 gRPC 证书目录}:/etc/linux-pilot/tls:ro

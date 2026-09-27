@@ -1,0 +1,62 @@
+name: linux-pilot
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: po
+      POSTGRES_USER: po
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U po -d po"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    image: linux-pilot-backend:local
+    build:
+      context: ./web
+      dockerfile: backend/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PO__DATABASE__URL: postgres://po:${POSTGRES_PASSWORD:-local-dev-password}@db:5432/po
+      PO__AUTH__VIEWER_TOKEN: ${VIEWER_TOKEN:-change-me-viewer}
+      PO__AUTH__OPERATOR_TOKEN: ${OPERATOR_TOKEN:-change-me-operator}
+      PO__WORKER__TOKEN: ${AGENT_TOKEN:-change-me-agent}
+      PO__APP__MODE: ${PO_MODE:-local}
+      PO__AUTH__PUBLIC_URL: ${PO_PUBLIC_URL:-http://localhost:3000}
+      PO__AUTH__ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin-5a2c966a29f39ec1248ae6ba480ae765158d26fef745e139}
+      PO__AUTH__CODE_PEPPER: ${PO_CODE_PEPPER:-change-me-code-pepper}
+      PO__AUTH__MAIL__HOST: ${SMTP_HOST:-mailpit}
+      PO__AUTH__MAIL__PORT: ${SMTP_PORT:-1025}
+      PO__AUTH__MAIL__SECURITY: ${SMTP_SECURITY:-none}
+      PO__AUTH__MAIL__FROM: ${SMTP_FROM:-Linux-Pilot <no-reply@linux-pilot.local>}
+      PO__AUTH__MAIL__USERNAME: ${SMTP_USERNAME:-}
+      PO__AUTH__MAIL__PASSWORD: ${SMTP_PASSWORD:-}
+      PO__AUTH__GITHUB__CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      PO__AUTH__GITHUB__CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      PO__AUTH__GOOGLE__CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      PO__AUTH__GOOGLE__CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      RUST_LOG: linux_pilot_server=info
+    ports:
+      - "50051:50051"
+    restart: unless-stopped
+
+  frontend:
+    image: linux-pilot-frontend:local
+    build:
+      context: ./web/frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

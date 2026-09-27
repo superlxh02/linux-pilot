@@ -1,0 +1,32 @@
+[package]
+name = "linux-pilot-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+linux-pilot-model = { path = "../contracts/model" }
+linux-pilot-scoring = { path = "domain" }
+linux-pilot-wire = { path = "../contracts/wire" }
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+config.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+sea-orm = { version = "1.1", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+tonic = { version = "0.14", features = ["transport", "tls-ring"] }
+tokio-stream = "0.1"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+subtle = "2"
+argon2 = "0.5"
+base64 = "0.22"
+getrandom = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"

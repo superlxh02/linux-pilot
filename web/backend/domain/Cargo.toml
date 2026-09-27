@@ -1,0 +1,7 @@
+[package]
+name = "linux-pilot-scoring"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+linux-pilot-model = { path = "../../contracts/model" }

@@ -12,8 +12,11 @@ mod interfaces;
 use anyhow::Context;
 use application::{
     auth::{AuthService, AuthStore, MailSender, OAuthGateway},
-    ports::{AlertRepository, MetricRepository, ProcessRepository, ProfileRepository},
+    ports::{
+        AlertRepository, MetricRepository, ProcessRepository, ProfileRepository, TopologyRepository,
+    },
     service::Application,
+    topology::TopologyApplication,
 };
 use axum::Router;
 use config::Settings;
@@ -30,6 +33,7 @@ use tracing::info;
 pub(crate) struct AppState {
     pub app: Arc<Application>,
     pub auth: Arc<AuthService>,
+    pub topology: Arc<TopologyApplication>,
     pub settings: Settings,
     pub streams: RwLock<HashMap<String, mpsc::Sender<linux_pilot_wire::agent::ServerFrame>>>,
 }
@@ -104,8 +108,14 @@ async fn main() -> anyhow::Result<()> {
     auth.bootstrap_admin()
         .await
         .context("初始化管理员账号失败")?;
+    let topology_repository: Arc<dyn TopologyRepository> =
+        Arc::new(infrastructure::topology_postgres::PostgresTopologyRepository::new(db.clone()));
     let repository = Arc::new(infrastructure::postgres::PostgresRepository::new(db));
     let metrics: Arc<dyn MetricRepository> = repository.clone();
+    let topology = Arc::new(TopologyApplication::new(
+        topology_repository,
+        metrics.clone(),
+    ));
     let profiles: Arc<dyn ProfileRepository> = repository.clone();
     let processes: Arc<dyn ProcessRepository> = repository.clone();
     let alerts: Arc<dyn AlertRepository> = repository;
@@ -119,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         app,
         auth,
+        topology,
         settings: settings.clone(),
         streams: RwLock::new(HashMap::new()),
     });

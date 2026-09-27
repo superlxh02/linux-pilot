@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         "明细采样间隔必须在 1～60 秒之间"
     );
     let host_id = stable_host_id(&settings)?;
-    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+    let kernel_boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .context("读取 Linux boot_id 失败")?
         .trim()
         .to_owned();
@@ -105,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         .trim()
         .to_owned();
     let spool = Arc::new(Mutex::new(spool::Spool::new(settings.spool_dir.clone())?));
+    let boot_id = spool.lock().await.boot_stream_id(&kernel_boot_id);
     let collector = collector::Collector::new();
     let ebpf_available = collector.ebpf_available();
     let (live_sender, live_receiver) = watch::channel(None);

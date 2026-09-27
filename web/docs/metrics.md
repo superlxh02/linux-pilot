@@ -110,12 +110,18 @@
 | 指标（单位） | 意义 / 诊断用途 | 来源 |
 | --- | --- | --- |
 | `proc.cpu_pct`（% 单核） | 进程 CPU 时间增量 / 墙上时间；可超过 100%，用于找 CPU 热点。 | `/proc/<pid>/stat` 的 utime + stime |
+| `proc.cpu_host_pct`（% 整机） | 进程占在线逻辑 CPU 总容量的比例；单核百分比除以在线 CPU 数。容器 CPU 配额须另看 cgroup。 | `proc.cpu_pct` 与 `/proc/stat` |
 | `proc.user_processes`（个） | 命令行非空的用户态进程总数，不包含内核线程；用于判断清单覆盖率。 | `/proc/<pid>/cmdline` |
 | `proc.inventory_omitted`（个） | 超过单节点 1024 项进程清单上限的数量；非零时列表并非全量。 | Worker 清单扫描 |
 | `proc.present`（当前态） | 最近一次用户进程清单，值为单核 CPU 百分比；标签包含 PID、启动 tick、UID、PPID、状态、RSS、名称和可执行文件路径。只保存最新状态，不进入历史指标表；不采集命令行参数。 | `/proc/<pid>/stat`、`status`、`cmdline` |
 | `proc.user_cpu_pct`（% 单核） | 进程用户态 CPU 消耗；定位应用计算。 | 同上 |
 | `proc.system_cpu_pct`（% 单核） | 进程内核态 CPU 消耗；定位系统调用开销。 | 同上 |
 | `proc.rss_bytes`（B） | 进程实际驻留物理页大小；找内存大户。 | `/proc/<pid>/status` 的 VmRSS |
+| `proc.rss_host_pct`（% 整机内存） | RSS 占宿主机总内存的比例；共享页会在不同进程中重复，因此不适合直接相加。 | VmRSS 与 `/proc/meminfo` |
+| `proc.pss_bytes`（B）与 `proc.pss_host_pct`（%） | 固定监控进程的按比例共享内存及其整机份额；比 RSS 更适合归因，读取较昂贵，仅对固定目标启用。 | `/proc/<pid>/smaps_rollup` |
+| `proc.private_clean_bytes`、`proc.private_dirty_bytes`、`proc.swap_bytes`（B） | 固定目标的私有内存及换出量；诊断堆内存与换页。 | `/proc/<pid>/smaps_rollup` |
+| `proc.stack_virtual_bytes`（B） | 进程主栈虚拟地址范围，不能当作已使用栈空间；真实逐线程栈深需要专门探针。 | `/proc/<pid>/status:VmStk` |
+| `proc.open_fds`（个） | 固定目标当前打开的文件描述符数；跟踪句柄泄漏。 | `/proc/<pid>/fd` |
 | `proc.vmsize_bytes`（B） | 虚拟地址空间大小；与 RSS 分开看，不能当成实际内存占用。 | `/proc/<pid>/status` 的 VmSize |
 | `proc.threads`（个） | 进程线程数；发现线程膨胀。 | `/proc/<pid>/status` |
 | `proc.major_faults_per_s`（次/秒） | 进程需外部读入的缺页速率；帮助定位个别应用内存压力。 | `/proc/<pid>/stat` |
@@ -126,6 +132,11 @@
 | `proc.write_syscalls_per_s`（次/秒） | 写类系统调用速率；识别小块频繁写入。 | `/proc/<pid>/io` 的 `syscw` |
 | `proc.voluntary_ctxt_per_s`（次/秒） | 进程主动让出 CPU 的频率；可能在等锁、I/O 或睡眠。 | `/proc/<pid>/status` |
 | `proc.involuntary_ctxt_per_s`（次/秒） | 进程被调度器抢占的频率；辅助判断 CPU 竞争。 | 同上 |
+| `proc.socket_rx_bytes_per_s`、`proc.socket_tx_bytes_per_s`（B/秒） | 固定目标的 `recvfrom/recvmsg/sendto/sendmsg` 成功返回字节数；仅是部分 socket 系统调用口径，不能等同完整进程网络流量或链路字节。 | eBPF syscall tracepoint |
+| `ebpf.socket_recv_calls_per_s`、`ebpf.socket_send_calls_per_s`（次/秒） | 节点级 socket syscall 探针实际命中次数；用于区分探针无样本与指定进程没有匹配数据。 | eBPF syscall tracepoint |
+| `thread.voluntary_ctxt_per_s`、`thread.involuntary_ctxt_per_s`（次/秒） | 固定目标每个 TID 的主动/被动上下文切换速率；用于找锁等待或竞争线程。 | `/proc/<pid>/task/<tid>/status` |
+| `thread.cpu_runtime_ms_per_s`、`thread.runqueue_wait_ms_per_s`、`thread.slices_per_s` | 每线程实际运行、排队等待与调度切片速率；等待时间不等同于一次切换的独立成本。 | `/proc/<pid>/task/<tid>/schedstat` |
+| `pod.net_rx_bytes_per_s`、`pod.net_tx_bytes_per_s`（B/秒） | Pod 共享网络命名空间的非 loopback 接口吞吐；不能按容器或进程拆分，也不含协议与链路层开销。 | `/proc/<pod-pid>/net/dev` |
 | `cgroup.cpu_usage_pct`（% 单核） | 工作负载 CPU 消耗；可超过 100%，用于容器资源归因。 | `cpu.stat:usage_usec` |
 | `cgroup.cpu_quota_cores`（核） | cgroup CPU 配额折算核心数；解释容器为何被限流。 | `cpu.max` |
 | `cgroup.cpu_throttled_per_s`（次/秒） | CPU 配额被触发的周期速率；高值提示受限。 | `cpu.stat:nr_throttled` |

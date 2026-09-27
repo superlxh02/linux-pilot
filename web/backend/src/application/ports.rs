@@ -3,6 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use linux_pilot_model::{Metric, Scenario, Score};
+use linux_pilot_scoring::topology::{PodObservation, TopologyManifest};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -183,4 +184,20 @@ pub trait AlertRepository: Send + Sync {
     async fn list_events(&self) -> Result<Vec<AlertEvent>>;
     async fn trigger(&self, rule: &AlertRule, host_id: &str, value: f64, now: i64) -> Result<()>;
     async fn resolve(&self, rule_id: &str, host_id: &str, now: i64) -> Result<()>;
+}
+
+/// 拓扑配置和 Kubernetes 发现事实分开持久化。
+/// 配置由用户版本控制；Pod UID 是随调度变化的运行时数据，不回写 Manifest。
+#[async_trait]
+pub trait TopologyRepository: Send + Sync {
+    async fn manifest(&self) -> Result<Option<TopologyManifest>>;
+    async fn apply_manifest(&self, manifest: &TopologyManifest) -> Result<()>;
+    async fn upsert_pods(&self, observations: &[PodObservation]) -> Result<()>;
+    async fn pods(&self, cluster_id: &str, since_ms: i64) -> Result<Vec<PodObservation>>;
+    async fn pod_metrics(
+        &self,
+        host_id: &str,
+        pod_uid: &str,
+        since_ms: i64,
+    ) -> Result<BTreeMap<String, f64>>;
 }

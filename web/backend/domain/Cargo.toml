@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 linux-pilot-model = { path = "../../contracts/model" }
+serde = { version = "1", features = ["derive"] }

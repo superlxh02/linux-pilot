@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/login', component: () => import('./pages/OverviewPage.vue') },
     { path: '/overview', component: () => import('./pages/OverviewPage.vue') },
     { path: '/hosts', component: () => import('./pages/HostsPage.vue') },
+    { path: '/cluster', component: () => import('./pages/ClusterPage.vue') },
     { path: '/metrics', component: () => import('./pages/MetricsPage.vue') },
     { path: '/processes', component: () => import('./pages/ProcessesPage.vue') },
     { path: '/scores', component: () => import('./pages/ScoresPage.vue') },

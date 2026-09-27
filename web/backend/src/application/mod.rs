@@ -2,3 +2,4 @@
 pub mod auth;
 pub mod ports;
 pub mod service;
+pub mod topology;

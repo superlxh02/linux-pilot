@@ -15,6 +15,7 @@ use std::{
 /// 一个宿主机身份对应一个缓冲目录；该目录应挂载到持久卷。
 pub struct Spool {
     directory: PathBuf,
+    stream_id: uuid::Uuid,
     sequence: u64,
     dropped: u64,
 }
@@ -26,6 +27,25 @@ impl Spool {
     /// 水位文件提交前退出，也可能在全部批次被确认后退出。
     pub fn new(directory: PathBuf) -> anyhow::Result<Self> {
         fs::create_dir_all(&directory)?;
+        // 宿主内核可能多年不重启，但容器的缓冲卷可能被重建。
+        // 去重身份必须同时包含独立的缓冲实例 ID；否则卷丢失后序号
+        // 从 1 开始，中心端会把新数据误认为同一内核启动期的旧批次。
+        let stream_path = directory.join("stream-id");
+        let stream_id = match fs::read_to_string(&stream_path)
+            .ok()
+            .and_then(|text| uuid::Uuid::parse_str(text.trim()).ok())
+        {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4();
+                durable_replace(
+                    &directory.join("stream-id.tmp"),
+                    &stream_path,
+                    id.to_string().as_bytes(),
+                )?;
+                id
+            }
+        };
         let pending_max = fs::read_dir(&directory)?
             .filter_map(Result::ok)
             .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u64>().ok())
@@ -39,9 +59,16 @@ impl Spool {
         let sequence = pending_max.max(saved);
         Ok(Self {
             directory,
+            stream_id,
             sequence,
             dropped: 0,
         })
+    }
+
+    /// 和真实内核 boot ID 共同形成一个传输 epoch；同一卷重启保持稳定，
+    /// 换卷即使仍处于同一次内核启动，也不会复用数据库去重键。
+    pub fn boot_stream_id(&self, kernel_boot_id: &str) -> String {
+        format!("{kernel_boot_id}:{}", self.stream_id)
     }
 
     /// 分配同一 Worker 进程内严格递增的序号，供批次去重键使用。
@@ -175,6 +202,7 @@ mod tests {
     fn pending_batch_and_sequence_survive_restart() {
         let dir = std::env::temp_dir().join(format!("po-spool-test-{}", uuid::Uuid::new_v4()));
         let mut spool = Spool::new(dir.clone()).unwrap();
+        let first_identity = spool.boot_stream_id("kernel-boot");
         let batch = MetricBatch {
             host_id: "h".into(),
             boot_id: "b".into(),
@@ -184,6 +212,7 @@ mod tests {
         spool.store(&batch).unwrap();
         drop(spool);
         let mut restarted = Spool::new(dir.clone()).unwrap();
+        assert_eq!(restarted.boot_stream_id("kernel-boot"), first_identity);
         let paths = restarted.pending_paths().unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(
@@ -193,5 +222,19 @@ mod tests {
         restarted.ack(1).unwrap();
         assert_eq!(restarted.next_sequence(), 2);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn new_spool_directory_gets_new_dedup_identity() {
+        let first = std::env::temp_dir().join(format!("po-stream-a-{}", uuid::Uuid::new_v4()));
+        let second = std::env::temp_dir().join(format!("po-stream-b-{}", uuid::Uuid::new_v4()));
+        let a = Spool::new(first.clone()).unwrap();
+        let b = Spool::new(second.clone()).unwrap();
+        assert_ne!(
+            a.boot_stream_id("same-kernel"),
+            b.boot_stream_id("same-kernel")
+        );
+        fs::remove_dir_all(first).unwrap();
+        fs::remove_dir_all(second).unwrap();
     }
 }

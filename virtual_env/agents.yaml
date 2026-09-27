@@ -1,0 +1,111 @@
+# 命名空间内的最小发现权限；Worker DaemonSet 只发送其所在 kind 节点的内核数据。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pilot-discovery
+  namespace: linux-pilot-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pilot-discovery
+  namespace: linux-pilot-demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pilot-discovery
+  namespace: linux-pilot-demo
+subjects:
+  - { kind: ServiceAccount, name: pilot-discovery, namespace: linux-pilot-demo }
+roleRef:
+  { kind: Role, name: pilot-discovery, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pilot-discovery
+  namespace: linux-pilot-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pilot-discovery }
+  template:
+    metadata:
+      labels: { app: pilot-discovery }
+    spec:
+      serviceAccountName: pilot-discovery
+      containers:
+        - name: discovery
+          image: linux-pilot-demo:local
+          imagePullPolicy: Never
+          command: ["python", "/etc/pilot/discovery.py"]
+          env:
+            - name: PILOT_OPERATOR_TOKEN
+              valueFrom:
+                secretKeyRef: { name: pilot-credentials, key: operator-token }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          volumeMounts:
+            - { name: code, mountPath: /etc/pilot, readOnly: true }
+      volumes:
+        - name: code
+          configMap: { name: pilot-discovery-code }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pilot-worker
+  namespace: linux-pilot-demo
+spec:
+  selector:
+    matchLabels: { app: pilot-worker }
+  template:
+    metadata:
+      labels: { app: pilot-worker }
+    spec:
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - { key: node-role.kubernetes.io/control-plane, operator: DoesNotExist }
+      containers:
+        - name: worker
+          image: linux-pilot-worker:local
+          imagePullPolicy: Never
+          securityContext:
+            privileged: true
+          env:
+            - { name: PO_AGENT__SERVER_URL, value: "http://host.docker.internal:50051" }
+            - { name: PO_AGENT__DETAIL_EVERY_SECS, value: "5" }
+            - name: PO_AGENT__HOST_ID
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: PO_AGENT__TOKEN
+              valueFrom:
+                secretKeyRef: { name: pilot-credentials, key: agent-token }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts:
+            - { name: sys, mountPath: /sys, readOnly: true }
+            - { name: spool, mountPath: /var/lib/linux-pilot-worker }
+      volumes:
+        - name: sys
+          hostPath: { path: /sys, type: Directory }
+        - name: spool
+          # 节点容器内持久化；DaemonSet 滚动重启后仍能重放与保持序号。
+          # kind 集群删除时节点容器一同删除，新集群会生成新的传输 epoch。
+          hostPath: { path: /var/lib/linux-pilot-worker-sim, type: DirectoryOrCreate }

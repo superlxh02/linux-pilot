@@ -13,9 +13,10 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use linux_pilot_model::Scenario;
+use linux_pilot_scoring::topology::{PodObservation, TopologyManifest};
 use linux_pilot_wire::agent::{ProfileCommand, ServerFrame, server_frame::Body};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,6 +38,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/profiles", get(profiles))
         .route("/api/v1/alerts", get(alert_rules))
         .route("/api/v1/alert-events", get(alert_events))
+        .route("/api/v1/topology/manifest", get(topology_manifest))
+        .route("/api/v1/topology/snapshot", get(topology_snapshot))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             authorize_reader,
@@ -50,6 +53,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/alerts", post(create_alert))
         .route("/api/v1/alerts/{id}", patch(update_alert))
+        .route("/api/v1/topology/validate", post(validate_topology))
+        .route("/api/v1/topology/manifest", put(apply_topology))
+        .route("/api/v1/topology/pods", post(observe_pods))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             authorize_operator,
@@ -71,6 +77,60 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(write_routes)
         .merge(admin_routes)
         .with_state(state)
+}
+
+/// 读取当前配置供文件化管理和 AI 自动化导出，运行时 Pod 不混进配置文件。
+async fn topology_manifest(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    let value = state.topology.manifest().await.map_err(server_error)?;
+    Ok(Json(json!(value)))
+}
+
+async fn topology_snapshot(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    Ok(Json(state.topology.snapshot().await.map_err(server_error)?))
+}
+
+/// dry-run 只执行领域校验，不要求当前集群在线，也不写数据库。
+async fn validate_topology(Json(manifest): Json<TopologyManifest>) -> ApiResult<Json<Value>> {
+    manifest
+        .validate()
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    Ok(Json(
+        json!({"valid":true,"revision":manifest.metadata.revision}),
+    ))
+}
+
+async fn apply_topology(
+    State(state): State<Arc<AppState>>,
+    Json(manifest): Json<TopologyManifest>,
+) -> ApiResult<Json<Value>> {
+    manifest
+        .validate()
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    state.topology.apply(&manifest).await.map_err(|error| {
+        let message = error.to_string();
+        if message.contains("版本冲突") {
+            (StatusCode::CONFLICT, message)
+        } else {
+            server_error(error)
+        }
+    })?;
+    Ok(Json(
+        json!({"applied":true,"revision":manifest.metadata.revision}),
+    ))
+}
+
+/// Kubernetes 发现器每轮按 Pod UID 更新事实；旧观察超过 90 秒即不参与快照。
+async fn observe_pods(
+    State(state): State<Arc<AppState>>,
+    Json(pods): Json<Vec<PodObservation>>,
+) -> ApiResult<Json<Value>> {
+    let count = pods.len();
+    state
+        .topology
+        .observe(&pods)
+        .await
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(json!({"accepted":count})))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

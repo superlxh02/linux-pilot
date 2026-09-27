@@ -5,19 +5,32 @@
 use anyhow::{Context, Result};
 use aya::{
     Btf, Ebpf,
-    maps::{Array, MapData},
+    maps::{Array, HashMap as AyaHashMap, MapData},
     programs::{BtfTracePoint, KProbe, TracePoint},
 };
 use linux_pilot_model::Metric;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::warn;
 
 pub struct EbpfCollector {
     _programs: Ebpf,
     counters: Array<MapData, u64>,
-    previous: [u64; 104],
+    previous: [u64; 106],
     attached: usize,
+    socket: AyaHashMap<MapData, u32, SocketCounters>,
+    socket_previous: HashMap<(u32, u64), SocketCounters>,
 }
+
+/// 与 eBPF C 结构体共享内存布局；两个 u64 都是单调递增计数器。
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SocketCounters {
+    tx_bytes: u64,
+    rx_bytes: u64,
+}
+
+// SAFETY: repr(C) 且全部字段是 u64，没有指针、生命周期或无效位模式。
+unsafe impl aya::Pod for SocketCounters {}
 
 impl EbpfCollector {
     /// 逐个加载探针，保留能工作的子集。
@@ -56,6 +69,27 @@ impl EbpfCollector {
         } else {
             attached += 1;
         }
+        for (program_name, tracepoint) in [
+            ("process_sendto", "sys_exit_sendto"),
+            ("process_sendmsg", "sys_exit_sendmsg"),
+            ("process_recvfrom", "sys_exit_recvfrom"),
+            ("process_recvmsg", "sys_exit_recvmsg"),
+        ] {
+            let result = (|| -> Result<()> {
+                let program: &mut TracePoint = programs
+                    .program_mut(program_name)
+                    .context("缺少进程 socket 探针")?
+                    .try_into()?;
+                program.load()?;
+                program.attach("syscalls", tracepoint)?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                warn!(%error, tracepoint, "进程 socket 探针加载失败");
+            } else {
+                attached += 1;
+            }
+        }
         if let Ok(btf) = Btf::from_sys_fs() {
             for (program_name, tracepoint) in [
                 ("block_issue", "block_rq_issue"),
@@ -88,7 +122,12 @@ impl EbpfCollector {
                 .take_map("COUNTERS")
                 .context("缺少 BPF 计数器 map")?,
         )?;
-        let mut previous = [0_u64; 104];
+        let socket = AyaHashMap::try_from(
+            programs
+                .take_map("PROCESS_SOCKET")
+                .context("缺少进程 socket map")?,
+        )?;
+        let mut previous = [0_u64; 106];
         for (index, slot) in previous.iter_mut().enumerate() {
             *slot = counters.get(&(index as u32), 0).unwrap_or(0);
         }
@@ -97,6 +136,8 @@ impl EbpfCollector {
             counters,
             previous,
             attached,
+            socket,
+            socket_previous: HashMap::new(),
         })
     }
 
@@ -110,8 +151,8 @@ impl EbpfCollector {
     /// map 内计数器自加载以来累计；`previous` 只在用户态维护，故每轮需
     /// 差分。分位数只在直方图有样本时输出，避免以零延迟掩盖数据缺失。
     pub fn sample(&mut self, now: i64, seconds: f64, output: &mut Vec<Metric>) {
-        let mut delta = [0_u64; 104];
-        for index in 0..104 {
+        let mut delta = [0_u64; 106];
+        for index in 0..106 {
             if let Ok(current) = self.counters.get(&(index as u32), 0) {
                 delta[index] = current.saturating_sub(self.previous[index]);
                 self.previous[index] = current;
@@ -127,6 +168,10 @@ impl EbpfCollector {
             });
         };
         emit("ebpf.tcp.retransmits_per_s", delta[0] as f64 / seconds);
+        // 全局 syscall 命中率用于判断进程归因探针是否真的有样本；
+        // 某进程缺少 socket 字节时，不能仅凭总 eBPF 可用就推断为零流量。
+        emit("ebpf.socket_send_calls_per_s", delta[104] as f64 / seconds);
+        emit("ebpf.socket_recv_calls_per_s", delta[105] as f64 / seconds);
         emit("ebpf.sched.switches_per_s", delta[1] as f64 / seconds);
         emit("ebpf.block.completed_per_s", delta[2] as f64 / seconds);
         if delta[2] > 0 {
@@ -159,6 +204,53 @@ impl EbpfCollector {
         if let Some(value) = histogram_p95(&delta[72..104]) {
             emit("ebpf.sched.runqueue_latency_p95_ms", value);
         }
+    }
+
+    /// 只把固定监控目标的 syscall socket 字节计数送入时序库。
+    /// 这是 sendto/sendmsg/recvfrom/recvmsg 的成功返回值，不是网卡线上字节。
+    pub fn sample_watched(
+        &mut self,
+        now: i64,
+        seconds: f64,
+        watched: &[(i32, u64)],
+        output: &mut Vec<Metric>,
+    ) {
+        let mut active = std::collections::HashSet::new();
+        for &(pid, start_ticks) in watched {
+            let Ok(pid_key) = u32::try_from(pid) else {
+                continue;
+            };
+            let Ok(current) = self.socket.get(&pid_key, 0) else {
+                continue;
+            };
+            let key = (pid_key, start_ticks);
+            active.insert(key);
+            if let Some(before) = self.socket_previous.insert(key, current) {
+                let labels = BTreeMap::from([
+                    ("pid".to_owned(), pid.to_string()),
+                    ("start_ticks".to_owned(), start_ticks.to_string()),
+                ]);
+                for (name, delta) in [
+                    (
+                        "proc.socket_tx_bytes_per_s",
+                        current.tx_bytes.saturating_sub(before.tx_bytes),
+                    ),
+                    (
+                        "proc.socket_rx_bytes_per_s",
+                        current.rx_bytes.saturating_sub(before.rx_bytes),
+                    ),
+                ] {
+                    output.push(Metric {
+                        name: name.to_owned(),
+                        value: delta as f64 / seconds,
+                        time_ms: now,
+                        labels: labels.clone(),
+                        source: "ebpf-syscall".to_owned(),
+                    });
+                }
+            }
+        }
+        self.socket_previous.retain(|key, _| active.contains(key));
     }
 }
 

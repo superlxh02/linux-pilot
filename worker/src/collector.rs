@@ -78,6 +78,10 @@ pub struct Collector {
     tcp_previous: HashMap<String, u64>,
     proc_previous: HashMap<i32, (u64, u64, u64)>,
     proc_extra_previous: HashMap<i32, (u64, HashMap<String, u64>)>,
+    // 线程计数器只为显式监控的进程保存，键和启动 tick 一起防止 TID 复用。
+    thread_previous: HashMap<(i32, i32), (u64, u64, [u64; 5])>,
+    // Pod 网络命名空间的接口计数器；多个容器共享同一命名空间，只取一次。
+    pod_net_previous: HashMap<String, (u64, u64)>,
     cgroup_previous: HashMap<String, HashMap<String, u64>>,
 }
 
@@ -104,6 +108,8 @@ impl Collector {
             tcp_previous: HashMap::new(),
             proc_previous: HashMap::new(),
             proc_extra_previous: HashMap::new(),
+            thread_previous: HashMap::new(),
+            pod_net_previous: HashMap::new(),
             cgroup_previous: HashMap::new(),
         }
     }
@@ -134,6 +140,7 @@ impl Collector {
         self.cgroups(now, elapsed, &mut out);
         if let (Some(probes), Some(seconds)) = (&mut self.ebpf, elapsed) {
             probes.sample(now, seconds, &mut out);
+            probes.sample_watched(now, seconds, watched, &mut out);
         }
         self.agent_health(now, &mut out);
         self.last_ms = Some(now);
@@ -997,6 +1004,7 @@ impl Collector {
             ));
         }
         candidates.sort_by_key(|(_, _, user, system, _, _)| std::cmp::Reverse(*user + *system));
+        self.pod_network(now, elapsed, &candidates, out);
         Self::plain(
             out,
             "proc.user_processes",
@@ -1048,6 +1056,10 @@ impl Collector {
                     ),
                     ("command".to_owned(), command),
                 ]);
+                let mut labels = labels;
+                if let Some(pod_uid) = process_pod_uid(*pid) {
+                    labels.insert("pod_uid".to_owned(), pod_uid);
+                }
                 let cpu = if hertz > 0.0 {
                     elapsed
                         .map(|seconds| {
@@ -1061,6 +1073,8 @@ impl Collector {
             }
         }
         let wanted: HashSet<(i32, u64)> = watched.iter().copied().collect();
+        let online_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as f64;
+        let host_memory = read_kv("/proc/meminfo", ':', 1024).get("MemTotal").copied();
         let mut selected = HashSet::new();
         for (pid, start, user_ticks, system_ticks, major_faults, block_delay) in candidates
             .into_iter()
@@ -1081,15 +1095,19 @@ impl Collector {
                 .chars()
                 .take(64)
                 .collect::<String>();
-            let labels = BTreeMap::from([
+            let mut labels = BTreeMap::from([
                 ("pid".to_owned(), pid.to_string()),
                 ("start_ticks".to_owned(), start.to_string()),
                 ("comm".to_owned(), comm),
             ]);
+            if let Some(pod_uid) = process_pod_uid(pid) {
+                labels.insert("pod_uid".to_owned(), pod_uid);
+            }
             if let Some(seconds) = elapsed {
                 // USER_HZ 通过 sysconf 获取，不能假设所有体系结构都是 100。
                 let hertz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
                 if hertz > 0.0 {
+                    let cpu_one_core = (user_ticks + system_ticks) as f64 / hertz / seconds * 100.0;
                     for (name, ticks) in [
                         ("proc.cpu_pct", user_ticks + system_ticks),
                         ("proc.user_cpu_pct", user_ticks),
@@ -1104,6 +1122,17 @@ impl Collector {
                             labels.clone(),
                         );
                     }
+                    if online_cpus > 0.0 {
+                        // 整机份额的分母是在线逻辑 CPU 数；容器配额比例另看 cgroup。
+                        Self::emit(
+                            out,
+                            "proc.cpu_host_pct",
+                            cpu_one_core / online_cpus,
+                            now,
+                            "proc",
+                            labels.clone(),
+                        );
+                    }
                 }
             }
             let status = read_kv(format!("/proc/{pid}/status"), ':', 1);
@@ -1111,6 +1140,8 @@ impl Collector {
                 ("VmRSS", "proc.rss_bytes", 1024.0),
                 ("VmSize", "proc.vmsize_bytes", 1024.0),
                 ("Threads", "proc.threads", 1.0),
+                // VmStk 是栈虚拟地址空间，不表示真正使用的栈物理页。
+                ("VmStk", "proc.stack_virtual_bytes", 1024.0),
             ] {
                 if let Some(&value) = status.get(key) {
                     Self::emit(
@@ -1122,6 +1153,63 @@ impl Collector {
                         labels.clone(),
                     );
                 }
+            }
+            if let (Some(total), Some(rss_kib)) = (host_memory, status.get("VmRSS")) {
+                if total > 0 {
+                    // RSS 含共享页；进程间相加会重复计算。PSS 份额更适合归因。
+                    Self::emit(
+                        out,
+                        "proc.rss_host_pct",
+                        *rss_kib as f64 * 1024.0 / total as f64 * 100.0,
+                        now,
+                        "proc",
+                        labels.clone(),
+                    );
+                }
+            }
+            if wanted.contains(&(pid, start)) {
+                // smaps_rollup 遍历页表，成本高于 status；只对用户固定目标读取。
+                let smaps = read_kv(format!("/proc/{pid}/smaps_rollup"), ':', 1);
+                for (key, name) in [
+                    ("Pss", "proc.pss_bytes"),
+                    ("Private_Clean", "proc.private_clean_bytes"),
+                    ("Private_Dirty", "proc.private_dirty_bytes"),
+                    ("Swap", "proc.swap_bytes"),
+                ] {
+                    if let Some(value) = smaps.get(key) {
+                        Self::emit(
+                            out,
+                            name,
+                            *value as f64 * 1024.0,
+                            now,
+                            "proc",
+                            labels.clone(),
+                        );
+                    }
+                }
+                if let (Some(total), Some(pss_kib)) = (host_memory, smaps.get("Pss")) {
+                    if total > 0 {
+                        Self::emit(
+                            out,
+                            "proc.pss_host_pct",
+                            *pss_kib as f64 * 1024.0 / total as f64 * 100.0,
+                            now,
+                            "proc",
+                            labels.clone(),
+                        );
+                    }
+                }
+                if let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) {
+                    Self::emit(
+                        out,
+                        "proc.open_fds",
+                        entries.count() as f64,
+                        now,
+                        "proc",
+                        labels.clone(),
+                    );
+                }
+                self.thread_details(pid, start, now, elapsed, out);
             }
             let io = read_kv(format!("/proc/{pid}/io"), ':', 1);
             let mut snapshot = io.clone();
@@ -1175,6 +1263,160 @@ impl Collector {
             .retain(|pid, _| Path::new(&format!("/proc/{pid}")).exists());
         self.proc_extra_previous
             .retain(|pid, _| Path::new(&format!("/proc/{pid}")).exists());
+        self.thread_previous
+            .retain(|(pid, tid), _| Path::new(&format!("/proc/{pid}/task/{tid}")).exists());
+    }
+
+    /// 固定监控进程的每线程调度计数。
+    ///
+    /// schedstat 的第二列是运行队列等待时间，不是上下文切换指令开销；
+    /// 第三列是运行时间片次数。跨线程相加前必须用相同采样窗口。
+    fn thread_details(
+        &mut self,
+        pid: i32,
+        process_start: u64,
+        now: i64,
+        elapsed: Option<f64>,
+        out: &mut Vec<Metric>,
+    ) {
+        let Ok(entries) = fs::read_dir(format!("/proc/{pid}/task")) else {
+            return;
+        };
+        for entry in entries.flatten().take(128) {
+            let Ok(tid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+                continue;
+            };
+            let base = format!("/proc/{pid}/task/{tid}");
+            let Ok(stat) = fs::read_to_string(format!("{base}/stat")) else {
+                continue;
+            };
+            let Some((_, tail)) = stat.rsplit_once(") ") else {
+                continue;
+            };
+            let Some(thread_start) = tail
+                .split_whitespace()
+                .nth(19)
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let status = read_kv(format!("{base}/status"), ':', 1);
+            let Ok(schedstat) = fs::read_to_string(format!("{base}/schedstat")) else {
+                continue;
+            };
+            let fields: Vec<u64> = schedstat
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if fields.len() < 3 {
+                continue;
+            }
+            let current = [
+                status.get("voluntary_ctxt_switches").copied().unwrap_or(0),
+                status
+                    .get("nonvoluntary_ctxt_switches")
+                    .copied()
+                    .unwrap_or(0),
+                fields[0],
+                fields[1],
+                fields[2],
+            ];
+            let labels = BTreeMap::from([
+                ("pid".to_owned(), pid.to_string()),
+                ("start_ticks".to_owned(), process_start.to_string()),
+                ("tid".to_owned(), tid.to_string()),
+            ]);
+            if let (Some(seconds), Some((old_process, old_thread, before))) = (
+                elapsed,
+                self.thread_previous
+                    .insert((pid, tid), (process_start, thread_start, current)),
+            ) {
+                if old_process == process_start && old_thread == thread_start {
+                    for (index, name, scale) in [
+                        (0, "thread.voluntary_ctxt_per_s", 1.0),
+                        (1, "thread.involuntary_ctxt_per_s", 1.0),
+                        (2, "thread.cpu_runtime_ms_per_s", 1.0 / 1_000_000.0),
+                        (3, "thread.runqueue_wait_ms_per_s", 1.0 / 1_000_000.0),
+                        (4, "thread.slices_per_s", 1.0),
+                    ] {
+                        Self::emit(
+                            out,
+                            name,
+                            current[index].saturating_sub(before[index]) as f64 * scale / seconds,
+                            now,
+                            "proc",
+                            labels.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 按 Pod 网络命名空间统计流量，适用于 Kubernetes 服务聚合。
+    ///
+    /// 这里不能声称是进程流量：同一 Pod 的 sidecar 与多个进程共享网卡。
+    /// /proc/<pid>/net/dev 读取的是该进程所在 netns 的接口计数器；每个
+    /// Pod 只挑一个用户态进程作为入口，排除 loopback 以免本地调用重计。
+    fn pod_network(
+        &mut self,
+        now: i64,
+        elapsed: Option<f64>,
+        candidates: &[(i32, u64, u64, u64, u64, Option<u64>)],
+        out: &mut Vec<Metric>,
+    ) {
+        let mut seen = HashSet::new();
+        for (pid, _, _, _, _, _) in candidates.iter().take(2048) {
+            let Some(uid) = process_pod_uid(*pid) else {
+                continue;
+            };
+            if !seen.insert(uid.clone()) {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(format!("/proc/{pid}/net/dev")) else {
+                continue;
+            };
+            let mut rx = 0_u64;
+            let mut tx = 0_u64;
+            for line in text.lines().skip(2) {
+                let Some((name, values)) = line.split_once(':') else {
+                    continue;
+                };
+                if name.trim() == "lo" {
+                    continue;
+                }
+                let fields: Vec<u64> = values
+                    .split_whitespace()
+                    .filter_map(|value| value.parse().ok())
+                    .collect();
+                if fields.len() >= 16 {
+                    rx = rx.saturating_add(fields[0]);
+                    tx = tx.saturating_add(fields[8]);
+                }
+            }
+            if let (Some(seconds), Some((old_rx, old_tx))) =
+                (elapsed, self.pod_net_previous.insert(uid.clone(), (rx, tx)))
+            {
+                let labels = BTreeMap::from([("pod_uid".to_owned(), uid)]);
+                Self::emit(
+                    out,
+                    "pod.net_rx_bytes_per_s",
+                    rx.saturating_sub(old_rx) as f64 / seconds,
+                    now,
+                    "netns",
+                    labels.clone(),
+                );
+                Self::emit(
+                    out,
+                    "pod.net_tx_bytes_per_s",
+                    tx.saturating_sub(old_tx) as f64 / seconds,
+                    now,
+                    "netns",
+                    labels,
+                );
+            }
+        }
+        self.pod_net_previous.retain(|uid, _| seen.contains(uid));
     }
 
     /// 读取 cgroup v2 用量与限制；不可用的控制器只影响对应子指标。
@@ -1183,15 +1425,25 @@ impl Collector {
         if !root.join("cgroup.controllers").exists() {
             return;
         }
+        // Kubernetes 和 systemd 的容器 cgroup 通常嵌套多层；只读根目录的
+        // 直接子项会完全漏掉 Pod。硬上限避免异常目录树产生无限时序标签。
         let mut groups = vec![root.to_path_buf()];
-        if let Ok(entries) = fs::read_dir(root) {
-            groups.extend(
-                entries
+        let mut next = 0;
+        while next < groups.len() && groups.len() < 256 {
+            let parent = groups[next].clone();
+            next += 1;
+            if let Ok(entries) = fs::read_dir(parent) {
+                for path in entries
                     .flatten()
                     .map(|entry| entry.path())
                     .filter(|path| path.is_dir())
-                    .take(20),
-            );
+                {
+                    if groups.len() >= 256 {
+                        break;
+                    }
+                    groups.push(path);
+                }
+            }
         }
         for path in groups {
             let group = path
@@ -1199,14 +1451,31 @@ impl Collector {
                 .ok()
                 .and_then(|item| item.to_str())
                 .unwrap_or("");
-            let labels = BTreeMap::from([(
-                "cgroup".to_owned(),
-                if group.is_empty() {
-                    "/".to_owned()
+            let pod_uid = pod_uid_from_cgroup(group);
+            let group_name = if let Some(uid) = &pod_uid {
+                // systemd 的完整 Pod cgroup 路径常超过标签长度限制。
+                // 使用稳定 UID 与末级容器 ID 形成短标签，父 Pod 与子容器
+                // 仍可区分；仓储只选择父 Pod 汇总，绝不把两层相加。
+                let last = group.rsplit('/').next().unwrap_or("");
+                if pod_uid_from_cgroup(last).is_some() {
+                    format!("pod:{uid}")
                 } else {
-                    format!("/{group}")
-                },
-            )]);
+                    format!("pod:{uid}/{last}")
+                }
+            } else if group.is_empty() {
+                "/".to_owned()
+            } else {
+                format!("/{group}")
+            };
+            // 协议对标签值有 128 字节上限。过深路径宁可显式漏采，也不能
+            // 生成中心端永久拒收的批次，让后续所有数据堵在本地缓冲里。
+            if group_name.len() > 128 {
+                continue;
+            }
+            let mut labels = BTreeMap::from([("cgroup".to_owned(), group_name)]);
+            if let Some(pod_uid) = pod_uid {
+                labels.insert("pod_uid".to_owned(), pod_uid);
+            }
             let mut snapshot = HashMap::new();
             for (file, fields) in [
                 (
@@ -1398,6 +1667,60 @@ impl Collector {
             now,
             "agent",
         );
+    }
+}
+
+/// 从 cgroup 路径抽取 Kubernetes Pod UID。systemd 的 `_` 转义和 cgroupfs
+/// 原生的 `-` 写法均可解析；UUID 校验可防止普通目录名被错当作 Pod。
+fn pod_uid_from_cgroup(path: &str) -> Option<String> {
+    for component in path.split('/') {
+        // systemd 的层名可能含有 "kubepods-...-pod<UID>"，所以从末尾
+        // 匹配，不能误把前面的 "kubepods" 当作 UID 前缀。
+        let Some(index) = component.rfind("pod") else {
+            continue;
+        };
+        let candidate: String = component[index + 3..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_hexdigit() || *ch == '-' || *ch == '_')
+            .collect();
+        if let Ok(uid) = uuid::Uuid::parse_str(&candidate.replace('_', "-")) {
+            return Some(uid.to_string());
+        }
+    }
+    None
+}
+
+/// /proc/<pid>/cgroup 是进程与 Pod 的内核侧归属证据。仅返回 UID，
+/// 不把不受控的完整路径写入高基数进程清单。
+fn process_pod_uid(pid: i32) -> Option<String> {
+    let text = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    text.lines()
+        .find_map(|line| line.splitn(3, ':').nth(2).and_then(pod_uid_from_cgroup))
+}
+
+#[cfg(test)]
+mod pod_identity_tests {
+    use super::pod_uid_from_cgroup;
+
+    #[test]
+    fn parses_systemd_and_cgroupfs_pod_paths() {
+        let uid = "275ecb36-5aa8-4c2a-9c47-d8bb681b9aff";
+        assert_eq!(
+            pod_uid_from_cgroup(&format!("/kubepods.slice/pod{}", uid.replace('-', "_"))),
+            Some(uid.into())
+        );
+        assert_eq!(
+            pod_uid_from_cgroup(&format!("/kubepods/burstable/pod{uid}/container")),
+            Some(uid.into())
+        );
+        assert_eq!(
+            pod_uid_from_cgroup(&format!(
+                "/kubelet.slice/kubelet-kubepods-burstable-pod{}.slice",
+                uid.replace('-', "_")
+            )),
+            Some(uid.into())
+        );
+        assert_eq!(pod_uid_from_cgroup("/system.slice/nginx.service"), None);
     }
 }
 

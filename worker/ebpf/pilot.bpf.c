@@ -16,7 +16,7 @@ typedef unsigned long long u64;
 /* Linux uapi bpf_map_type: HASH=1, ARRAY=2。 */
 struct {
     __uint(type, 2);
-    __uint(max_entries, 104);
+    __uint(max_entries, 106);
     __type(key, u32);
     __type(value, u64);
 } COUNTERS SEC(".maps");
@@ -42,19 +42,58 @@ struct {
     __type(value, u64);
 } SCHED_START SEC(".maps");
 
+/* 9 是 BPF_MAP_TYPE_LRU_HASH；进程退出后的键最终会被活跃进程替换。 */
+struct process_socket_counters { u64 tx_bytes; u64 rx_bytes; };
+struct {
+    __uint(type, 9);
+    __uint(max_entries, 8192);
+    __type(key, u32);
+    __type(value, struct process_socket_counters);
+} PROCESS_SOCKET SEC(".maps");
+
 /* eBPF helper ID 是内核 ABI，声明为函数指针供编译器生成 helper 调用。 */
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
 static long (*bpf_map_update_elem)(void *map, const void *key, const void *value, u64 flags) = (void *)2;
 static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *)3;
 static u64 (*bpf_ktime_get_ns)(void) = (void *)5;
+static u64 (*bpf_get_current_pid_tgid)(void) = (void *)14;
 
 static __attribute__((always_inline)) void increment(u32 key, u64 delta) {
     u64 *value = bpf_map_lookup_elem(&COUNTERS, &key);
-    if (value) {
-        /* 多核同时命中时需要原子累加，否则高频事件会丢计数。 */
-        __sync_fetch_and_add(value, delta);
-    }
+    if (value) __sync_fetch_and_add(value, delta);
 }
+
+/* syscall exit tracepoint: common 8 字节，syscall_nr 4 字节及填充，ret 在偏移 16。 */
+struct syscall_exit_context { u64 common; u64 syscall_nr_padding; long ret; };
+
+static __attribute__((always_inline)) int count_socket_bytes(struct syscall_exit_context *ctx, int receive) {
+    if (ctx->ret <= 0) return 0;
+    increment(receive ? 105 : 104, 1);
+    u32 pid = (u32)(bpf_get_current_pid_tgid() >> 32);
+    struct process_socket_counters *value = bpf_map_lookup_elem(&PROCESS_SOCKET, &pid);
+    if (!value) {
+        struct process_socket_counters zero = {0, 0};
+        bpf_map_update_elem(&PROCESS_SOCKET, &pid, &zero, 0);
+        value = bpf_map_lookup_elem(&PROCESS_SOCKET, &pid);
+    }
+    if (value) {
+        if (receive) __sync_fetch_and_add(&value->rx_bytes, (u64)ctx->ret);
+        else __sync_fetch_and_add(&value->tx_bytes, (u64)ctx->ret);
+    }
+    return 0;
+}
+
+/* 仅统计成功的 socket send/recv 系统调用返回字节数。
+ * write/read 到 socket、sendfile、零拷贝及代理转发不在此口径；
+ * 因此进程值是“可归因的部分应用负载”，Pod 网卡计数单独提供完整视角。 */
+SEC("tracepoint/syscalls/sys_exit_sendto")
+int process_sendto(struct syscall_exit_context *ctx) { return count_socket_bytes(ctx, 0); }
+SEC("tracepoint/syscalls/sys_exit_sendmsg")
+int process_sendmsg(struct syscall_exit_context *ctx) { return count_socket_bytes(ctx, 0); }
+SEC("tracepoint/syscalls/sys_exit_recvfrom")
+int process_recvfrom(struct syscall_exit_context *ctx) { return count_socket_bytes(ctx, 1); }
+SEC("tracepoint/syscalls/sys_exit_recvmsg")
+int process_recvmsg(struct syscall_exit_context *ctx) { return count_socket_bytes(ctx, 1); }
 
 static __attribute__((always_inline)) void observe(u32 first_bucket, u64 elapsed_ns) {
     u64 microseconds = elapsed_ns / 1000;

@@ -18,6 +18,7 @@ Linux-Pilot 在目标 Linux 主机上持续采集性能指标和内核信号，�
 | 内核与剖析 | Aya eBPF 的 TCP、块 I/O 与调度信号；按需 perf CPU 调用栈和火焰图 |
 | 可靠传输 | Worker 主动建立 gRPC/HTTP2 双向流；本地磁盘缓冲、ACK、断线回放和批次去重 |
 | 观测控制台 | 节点总览、按挂载点与 cgroup 画图、用户态进程清单、固定监控服务进程、五场景评分、告警和性能剖析；WebSocket 实时更新 |
+| 集群实验环境 | `virtual_env/` 的 kind 三节点 Kubernetes、订单/库存真实服务、DaemonSet Worker、Pod 归属与跨节点资源快照 |
 | 账号 | 邮箱验证码注册、Argon2id 密码、HttpOnly 会话；管理员用户管理、角色分配和操作记录 |
 
 指标的单位、来源、含义及诊断用途见 [完整指标字典](web/docs/metrics.md)。该字典也标出了尚未实现的候选指标；页面会对缺失数据标明缺失，不会显示假零值。
@@ -40,6 +41,7 @@ web/                       独立 Cargo 工作区
   site/                    项目官网静态页面
   docs/                    指标与认证文档
 compose.yaml               只包含 Web 前端、Web 后端和 PostgreSQL
+virtual_env/               本地三节点 Kubernetes、真实示例服务和负载模拟
 ```
 
 Worker 与 Web **没有根目录 Cargo 工作区**，可分别拷贝、构建和部署。为保证独立性，版本化契约在两边各保留一份；修改协议后运行 `bash web/scripts/check-contracts.sh` 检查副本一致。Protobuf 的 `po.agent.v1` 命名空间为兼容现有 v1 数据流保留，产品名称已改为 Linux-Pilot。
@@ -94,6 +96,19 @@ docker rm -f linux-pilot-cpu-demo
 
 ## 开发
 
+### 三节点 Kubernetes 实验环境
+
+macOS + Docker Desktop/OrbStack 上可运行 `./virtual_env/manage.sh up` 创建 1 个控制节点和 2 个工作节点，构建并部署订单、库存服务及每节点 Worker。安装的 `kind` 和兼容版本 `kubectl` 由脚本使用；完整步骤、资源边界、拓扑 JSON 与评分口径见 [实验环境说明](virtual_env/README.md)。
+
+```bash
+./virtual_env/manage.sh up
+./virtual_env/manage.sh status
+./virtual_env/manage.sh load --duration 60 --rate 4 --mode mixed
+./virtual_env/manage.sh down
+```
+
+这些 kind 节点共享 Docker Linux VM 的物理资源，只用于验证 Kubernetes 归属和跨节点功能，不代表三台独立服务器的基准测试结果。
+
 Rust 1.98 或更高版本、Node.js 24 可用于本地开发。两端各自运行测试：
 
 ```bash
@@ -109,7 +124,7 @@ Worker 的 eBPF/perf 路径必须在 Linux 上验证；macOS Rust 构建只覆�
 
 - PostgreSQL 的指标默认保留 7 天。尚无时间分区、长期聚合和多节点容量压测。
 - 实时事件由单个后端进程广播；后端多副本需要共享事件总线和任务路由。
-- eBPF 的可用性依赖内核、BTF、权限和容器环境；探针失败时仍上报基础指标并标记能力。
+- eBPF 的可用性依赖内核、BTF、权限和容器环境；探针失败时仍上报基础指标并标记能力。进程 Socket 字节只覆盖部分 send/recv 系统调用，不能当作完整网络归因；Pod 网络命名空间吞吐可用于服务级总量。
 - perf 依赖宿主机权限和符号质量；首版每台主机同一时间只运行一个任务。
 - 规则评分用于定位线索，不能替代受控基准测试。AI 根因分析、自动调优和多租户尚未交付。
 

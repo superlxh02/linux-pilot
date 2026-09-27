@@ -168,6 +168,30 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         ))
         .await?;
     }
+    // v6 把可版本化的用户配置与短生命周期的 Pod 发现事实分开保存。
+    // 发现记录以 Pod UID 为键，实例迁移或重建时不会污染老实例的指标归属。
+    let version_six_exists = tx
+        .query_one(stmt(
+            "SELECT version FROM schema_migrations WHERE version=6",
+            std::iter::empty::<sea_orm::Value>(),
+        ))
+        .await?
+        .is_some();
+    if !version_six_exists {
+        for sql in [
+            "CREATE TABLE topology_manifest (id TEXT PRIMARY KEY,revision BIGINT NOT NULL,payload JSONB NOT NULL,applied_ms BIGINT NOT NULL)",
+            "CREATE TABLE pod_observations (cluster_id TEXT NOT NULL,pod_uid TEXT NOT NULL,pod_name TEXT NOT NULL,node_id TEXT NOT NULL,namespace TEXT NOT NULL,workload_kind TEXT NOT NULL,workload_name TEXT NOT NULL,ready BOOLEAN NOT NULL,observed_ms BIGINT NOT NULL,PRIMARY KEY(cluster_id,pod_uid))",
+            "CREATE INDEX pod_observations_lookup ON pod_observations(cluster_id,namespace,workload_kind,workload_name,observed_ms DESC)",
+            "CREATE INDEX metrics_pod_uid_lookup ON metrics(host_id,(labels->>'pod_uid'),time_ms DESC) WHERE labels ? 'pod_uid'",
+        ] {
+            tx.execute_unprepared(sql).await?;
+        }
+        tx.execute(stmt(
+            "INSERT INTO schema_migrations(version,applied_ms) VALUES(6,$1)",
+            [chrono::Utc::now().timestamp_millis().into()],
+        ))
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
 }

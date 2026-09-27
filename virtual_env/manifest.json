@@ -1,0 +1,74 @@
+{
+  "apiVersion": "linux-pilot.io/v1alpha1",
+  "kind": "TopologyManifest",
+  "metadata": { "id": "linux-pilot-sim", "revision": 1 },
+  "spec": {
+    "clusters": [
+      { "id": "linux-pilot-sim", "type": "kubernetes" }
+    ],
+    "scoreProfiles": [
+      {
+        "id": "general-v1",
+        "scope": "node",
+        "engine": "rule-based/v1",
+        "scenario": "general",
+        "weights": { "cpu": 0.25, "memory": 0.20, "application_io": 0.20, "storage": 0.20, "network": 0.15 }
+      },
+      {
+        "id": "storage-v1",
+        "scope": "node",
+        "engine": "rule-based/v1",
+        "scenario": "storage",
+        "weights": { "cpu": 0.10, "memory": 0.15, "application_io": 0.15, "storage": 0.50, "network": 0.10 }
+      }
+    ],
+    "nodes": [
+      {
+        "id": "linux-pilot-sim-worker",
+        "clusterId": "linux-pilot-sim",
+        "description": "订单与通用计算节点；kind Linux 容器，共享 Docker VM 硬件",
+        "role": "application",
+        "scoreProfileRef": "general-v1",
+        "capacity": {
+          "cpuCores": 12,
+          "memoryBytes": 16819298304,
+          "storage": [{ "mount": "/", "medium": "virtual", "capacityBytes": 53687091200 }]
+        }
+      },
+      {
+        "id": "linux-pilot-sim-worker2",
+        "clusterId": "linux-pilot-sim",
+        "description": "订单与库存持久化模拟节点；kind Linux 容器，共享 Docker VM 硬件",
+        "role": "storage",
+        "scoreProfileRef": "storage-v1",
+        "capacity": {
+          "cpuCores": 12,
+          "memoryBytes": 16819298304,
+          "storage": [{ "mount": "/data", "medium": "virtual", "capacityBytes": 53687091200 }]
+        }
+      }
+    ],
+    "services": [
+      {
+        "id": "catalog",
+        "clusterId": "linux-pilot-sim",
+        "description": "库存查询与原子扣减；SQLite 写入及磁盘刷新",
+        "criticality": "critical",
+        "match": { "type": "kubernetes-workload", "namespace": "linux-pilot-demo", "kind": "Deployment", "name": "catalog" },
+        "dependsOn": []
+      },
+      {
+        "id": "orders",
+        "clusterId": "linux-pilot-sim",
+        "description": "跨节点调用库存后创建订单；两个副本分散在两个 worker 节点",
+        "criticality": "critical",
+        "match": { "type": "kubernetes-workload", "namespace": "linux-pilot-demo", "kind": "Deployment", "name": "orders" },
+        "dependsOn": ["catalog"]
+      }
+    ],
+    "systemScore": {
+      "weights": { "endToEnd": 0.50, "criticalServices": 0.30, "capacityAndResilience": 0.20 },
+      "criticalServiceMaxDelta": 10.0
+    }
+  }
+}

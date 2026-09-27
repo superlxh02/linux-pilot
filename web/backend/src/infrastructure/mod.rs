@@ -3,3 +3,4 @@ pub mod auth_postgres;
 pub mod mail;
 pub mod oauth;
 pub mod postgres;
+pub mod topology_postgres;

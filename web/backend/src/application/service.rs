@@ -167,7 +167,7 @@ impl Application {
                 "指标名无效"
             );
             ensure!(
-                metric.labels.len() <= 8
+                metric.labels.len() <= 9
                     && metric
                         .labels
                         .iter()

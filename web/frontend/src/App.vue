@@ -6,7 +6,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { Activity, ArrowRight, Bell, ChartNoAxesCombined, CircleHelp, Gauge, LayoutDashboard, LockKeyhole, LogOut, RefreshCw, Server, ShieldCheck, UsersRound, ListTree } from '@lucide/vue'
+import { Activity, ArrowRight, Bell, ChartNoAxesCombined, CircleHelp, Gauge, LayoutDashboard, LockKeyhole, LogOut, RefreshCw, Server, ShieldCheck, UsersRound, ListTree, Network } from '@lucide/vue'
 import { usePlatform } from './store'
 import { request } from './api'
 
@@ -29,6 +29,7 @@ let codeTimer: number | undefined
 const navigation = [
   { path: '/overview', label: '总览', icon: LayoutDashboard },
   { path: '/hosts', label: '节点', icon: Server },
+  { path: '/cluster', label: '集群与服务', icon: Network },
   { path: '/metrics', label: '指标探索', icon: Activity },
   { path: '/processes', label: '进程监控', icon: ListTree },
   { path: '/scores', label: '场景评分', icon: Gauge },

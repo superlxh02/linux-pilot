@@ -8,6 +8,8 @@
 use linux_pilot_model::{Metric, Scenario, Score, ScoreFactor};
 use std::collections::{BTreeMap, HashMap};
 
+pub mod topology;
+
 /// 规则方向。
 #[derive(Debug, Clone, Copy)]
 pub enum Direction {
@@ -315,22 +317,33 @@ impl RuleBasedScoreEngine {
     pub fn new(rules: Vec<Rule>, version: &'static str) -> Self {
         Self { rules, version }
     }
-}
 
-impl ScoreEngine for RuleBasedScoreEngine {
-    /// 计算场景分和完整证据。
-    ///
-    /// 只接受无标签主机汇总，防止设备/进程明细与整机样本混用。
-    /// 每个维度按**已到达**指标权重归一化，但同时把缺失份额计入覆盖率。
-    /// 所有维度分、扣分项和缺失项都返回给前端，便于复核结果。
-    fn calculate(
+    /// 使用清单中经过校验的维度权重计算节点分；底层指标阈值保持规则版本固定。
+    /// 这样配置只改变场景关注点，不会让未校验的 JSON 改写具体测量口径。
+    pub fn calculate_with_weights(
         &self,
         host_id: &str,
         time_ms: i64,
         scenario: Scenario,
         metrics: &[Metric],
+        weights: &BTreeMap<String, f64>,
     ) -> Score {
-        // 主机评分只采纳不带标签的聚合值；设备和进程维度另用于问题定位。
+        let dimensions = ["cpu", "memory", "application_io", "storage", "network"];
+        let selected: Vec<(&str, f64)> = dimensions
+            .iter()
+            .filter_map(|name| weights.get(*name).map(|weight| (*name, *weight)))
+            .collect();
+        self.calculate_dimensions(host_id, time_ms, scenario, metrics, &selected)
+    }
+
+    fn calculate_dimensions(
+        &self,
+        host_id: &str,
+        time_ms: i64,
+        scenario: Scenario,
+        metrics: &[Metric],
+        dimensions: &[(&str, f64)],
+    ) -> Score {
         let values: HashMap<&str, f64> = metrics
             .iter()
             .filter(|metric| metric.labels.is_empty() && metric.value.is_finite())
@@ -343,7 +356,7 @@ impl ScoreEngine for RuleBasedScoreEngine {
         let mut weighted_score = 0.0;
         let mut available_dimensions = 0.0;
 
-        for (dimension, dimension_weight) in scenario_weights(scenario) {
+        for &(dimension, dimension_weight) in dimensions {
             let mut configured = 0.0;
             let mut available = 0.0;
             let mut weighted_penalty = 0.0;
@@ -379,7 +392,6 @@ impl ScoreEngine for RuleBasedScoreEngine {
             };
             dimension_scores.insert(dimension.to_owned(), score);
         }
-        // 缺失指标不算 0，也不算满分。覆盖率不足时返回“数据不足”。
         let value = if coverage >= 0.70 && available_dimensions > 0.0 {
             Some((weighted_score / available_dimensions).clamp(0.0, 100.0))
         } else {
@@ -396,6 +408,29 @@ impl ScoreEngine for RuleBasedScoreEngine {
             factors,
             missing,
         }
+    }
+}
+
+impl ScoreEngine for RuleBasedScoreEngine {
+    /// 计算场景分和完整证据。
+    ///
+    /// 只接受无标签主机汇总，防止设备/进程明细与整机样本混用。
+    /// 每个维度按**已到达**指标权重归一化，但同时把缺失份额计入覆盖率。
+    /// 所有维度分、扣分项和缺失项都返回给前端，便于复核结果。
+    fn calculate(
+        &self,
+        host_id: &str,
+        time_ms: i64,
+        scenario: Scenario,
+        metrics: &[Metric],
+    ) -> Score {
+        self.calculate_dimensions(
+            host_id,
+            time_ms,
+            scenario,
+            metrics,
+            &scenario_weights(scenario),
+        )
     }
 }
 

@@ -524,8 +524,8 @@ async fn metrics(
     }
     if query.category.as_ref().is_some_and(|value| {
         ![
-            "cpu", "mem", "disk", "fs", "net", "tcp", "proc", "cgroup", "ebpf", "agent", "host",
-            "io",
+            "cpu", "mem", "disk", "fs", "net", "tcp", "proc", "thread", "pod", "cgroup", "ebpf",
+            "agent", "host", "io",
         ]
         .contains(&value.as_str())
     }) {
@@ -551,8 +551,18 @@ async fn metrics(
         labels.is_empty()
             || labels.len() > 2
             || labels.iter().any(|(key, value)| {
-                !["mount", "cgroup", "pid", "start_ticks", "device", "iface"]
-                    .contains(&key.as_str())
+                // 服务详情按动态 Pod UID 查询；该字段来自只读发现器，
+                // 与父 Pod cgroup 一起过滤可避免同节点其他工作负载混入。
+                ![
+                    "mount",
+                    "cgroup",
+                    "pod_uid",
+                    "pid",
+                    "start_ticks",
+                    "device",
+                    "iface",
+                ]
+                .contains(&key.as_str())
                     || value.len() > 128
             })
     }) {

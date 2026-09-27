@@ -9,7 +9,7 @@ import { usePlatform } from '../store'
 
 const LineChart = defineAsyncComponent(() => import('../components/LineChart.vue'))
 const platform = usePlatform()
-const { hostId, range, latest, scores, hosts, selectedHost } = storeToRefs(platform)
+const { hostId, range, latest, scores, visibleHosts, selectedHost, deploymentMode, topologyManifest } = storeToRefs(platform)
 const chartData = ref<Record<string, Metric[]>>({})
 const processData = ref<Metric[]>([])
 const alerts = ref<AlertEvent[]>([])
@@ -17,8 +17,13 @@ const loading = ref(false)
 const error = ref('')
 let refreshTimer: number | undefined
 
-const onlineCount = computed(() => hosts.value.filter((host) => host.online).length)
-const score = computed(() => scores.value.general)
+const onlineCount = computed(() => visibleHosts.value.filter((host) => host.online).length)
+// 节点详情必须遵循拓扑中配置的评分场景，不能固定显示通用场景。
+const scoringScenario = computed(() => {
+  const node = topologyManifest.value?.spec.nodes.find((item) => item.id === hostId.value)
+  return topologyManifest.value?.spec.scoreProfiles.find((item) => item.id === node?.scoreProfileRef)?.scenario || 'general'
+})
+const score = computed(() => scores.value[scoringScenario.value])
 const drivers = computed(() => [...(score.value?.factors || [])]
   .filter((factor) => factor.penalty > 0)
   .sort((a, b) => b.penalty * b.weight - a.penalty * a.weight).slice(0, 4))
@@ -45,14 +50,14 @@ async function load() {
     const params = new URLSearchParams({ host_id: id, category: 'proc', from: String(now - 15_000), to: String(now), limit: '6000' })
     const [cpu, mem, disk, net, processes, events, history] = await Promise.all([
       platform.queryMetrics('cpu'), platform.queryMetrics('mem'), platform.queryMetrics('disk'),
-      platform.queryMetrics('net'), request<Metric[]>(`/api/v1/metrics?${params}`),
-      request<AlertEvent[]>('/api/v1/alert-events'), platform.queryScores('general')
+      platform.queryMetrics('net'), deploymentMode.value === 'standalone' ? request<Metric[]>(`/api/v1/metrics?${params}`) : Promise.resolve([]),
+      request<AlertEvent[]>('/api/v1/alert-events'), platform.queryScores(scoringScenario.value)
     ])
     if (id !== hostId.value) return
     chartData.value = { cpu, mem, disk, net }
     processData.value = processes
     alerts.value = events.filter((item) => item.host_id === id).slice(0, 4)
-    if (!scores.value.general && history.length) scores.value.general = history.at(-1)!
+    if (!scores.value[scoringScenario.value] && history.length) scores.value[scoringScenario.value] = history.at(-1)!
   } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
   finally { loading.value = false }
 }
@@ -64,7 +69,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
 
 <template>
   <div class="page-stack">
-    <div class="page-intro"><div><h2>运行概况</h2><p>所选节点的资源、内核事件与近期风险。数据每秒上报，图表按当前时间范围查询。</p></div><span class="subtle-meta">{{ selectedHost?.hostname || '未选择节点' }}</span></div>
+    <div class="page-intro"><div><h2>{{ deploymentMode === 'kubernetes' ? '工作节点详情' : '主机运行概况' }}</h2><p>所选节点的资源、内核事件与近期风险。Kubernetes 服务资源请进入“微服务”页面查看。</p></div><span class="subtle-meta">{{ selectedHost?.hostname || '未选择节点' }}</span></div>
     <div v-if="error" class="notice error">{{ error }}</div>
     <div v-if="!hostId" class="empty-panel">暂无节点。请先部署 Worker 并等待接入。</div>
     <template v-else>
@@ -76,7 +81,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
       </div>
 
       <div class="dashboard-grid">
-        <section class="panel score-overview"><div class="panel-header"><div><h3>性能评分</h3><p>通用场景 · 最近 60 秒</p></div><RouterLink to="/scores" class="text-link">查看解释 <ArrowRight :size="14" /></RouterLink></div>
+        <section class="panel score-overview"><div class="panel-header"><div><h3>节点资源评分</h3><p>{{ scoringScenario }} 场景 · 最近 60 秒</p></div><RouterLink v-if="deploymentMode === 'standalone'" to="/scores" class="text-link">查看解释 <ArrowRight :size="14" /></RouterLink></div>
           <div class="score-main"><strong :class="score?.value == null ? 'neutral' : score.value < 60 ? 'danger' : score.value < 80 ? 'warning' : 'healthy'">{{ score?.value == null ? '—' : score.value.toFixed(0) }}</strong><div><span> / 100</span><p>指标覆盖 {{ score ? (score.coverage * 100).toFixed(0) : '—' }}%</p><small>{{ score?.value == null ? '数据不足，显示缺失项' : '分值按场景权重计算' }}</small></div></div>
           <div class="panel-divider"></div><div class="compact-list"><div v-if="!drivers.length" class="quiet-row">当前窗口没有明显扣分项</div><div v-for="factor in drivers" :key="factor.metric" class="compact-row"><span>{{ metricTitle(factor.metric) }}</span><strong>{{ formatValue(factor.metric, factor.value) }}</strong></div></div>
         </section>
@@ -85,7 +90,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
           <div class="capability-row"><span>eBPF</span><strong :class="selectedHost?.capabilities.ebpf ? 'text-success' : 'text-warning'">{{ selectedHost?.capabilities.ebpf ? '可用' : '不可用' }}</strong></div>
           <div class="capability-row"><span>perf</span><strong :class="selectedHost?.capabilities.perf ? 'text-success' : 'text-warning'">{{ selectedHost?.capabilities.perf ? '已安装' : '不可用' }}</strong></div>
           <div class="capability-row"><span>cgroup v2</span><strong :class="selectedHost?.capabilities.cgroup_v2 ? 'text-success' : 'text-warning'">{{ selectedHost?.capabilities.cgroup_v2 ? '可用' : '不可用' }}</strong></div>
-          <div class="capability-row"><span>在线节点</span><strong>{{ onlineCount }} / {{ hosts.length }}</strong></div>
+          <div class="capability-row"><span>在线节点</span><strong>{{ onlineCount }} / {{ visibleHosts.length }}</strong></div>
         </section>
       </div>
 
@@ -97,7 +102,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
       </div>
 
       <div class="dashboard-grid">
-        <section class="panel"><div class="panel-header"><div><h3>CPU 热点进程</h3><p>最近 15 秒采集的前 20 个用户进程</p></div><RouterLink to="/processes" class="text-link">查看进程 <ArrowRight :size="14" /></RouterLink></div>
+        <section v-if="deploymentMode === 'standalone'" class="panel"><div class="panel-header"><div><h3>CPU 热点进程</h3><p>最近 15 秒采集的前 20 个用户进程</p></div><RouterLink to="/processes" class="text-link">查看进程 <ArrowRight :size="14" /></RouterLink></div>
           <table class="data-table"><thead><tr><th>进程</th><th>PID</th><th class="align-right">CPU</th><th class="align-right">RSS</th></tr></thead><tbody><tr v-for="item in topProcesses" :key="item.pid"><td>{{ item.name }}</td><td class="mono">{{ item.pid }}</td><td class="align-right">{{ formatValue('proc.cpu_pct', item.cpu) }}</td><td class="align-right">{{ formatValue('proc.rss_bytes', item.rss) }}</td></tr><tr v-if="!topProcesses.length"><td colspan="4" class="table-empty">暂无线程/进程数据</td></tr></tbody></table>
         </section>
         <section class="panel"><div class="panel-header"><div><h3>近期告警</h3><p>当前节点最新事件</p></div><RouterLink to="/alerts" class="text-link">告警中心 <ArrowRight :size="14" /></RouterLink></div>

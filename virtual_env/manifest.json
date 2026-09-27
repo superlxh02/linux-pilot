@@ -1,10 +1,20 @@
 {
   "apiVersion": "linux-pilot.io/v1alpha1",
   "kind": "TopologyManifest",
-  "metadata": { "id": "linux-pilot-sim", "revision": 1 },
+  "metadata": {
+    "id": "linux-pilot-lab",
+    "revision": 1
+  },
   "spec": {
     "clusters": [
-      { "id": "linux-pilot-sim", "type": "kubernetes" }
+      {
+        "id": "linux-pilot-sim",
+        "type": "kubernetes"
+      },
+      {
+        "id": "standalone-sim",
+        "type": "standalone"
+      }
     ],
     "scoreProfiles": [
       {
@@ -12,17 +22,43 @@
         "scope": "node",
         "engine": "rule-based/v1",
         "scenario": "general",
-        "weights": { "cpu": 0.25, "memory": 0.20, "application_io": 0.20, "storage": 0.20, "network": 0.15 }
+        "weights": {
+          "cpu": 0.25,
+          "memory": 0.2,
+          "application_io": 0.2,
+          "storage": 0.2,
+          "network": 0.15
+        }
       },
       {
         "id": "storage-v1",
         "scope": "node",
         "engine": "rule-based/v1",
         "scenario": "storage",
-        "weights": { "cpu": 0.10, "memory": 0.15, "application_io": 0.15, "storage": 0.50, "network": 0.10 }
+        "weights": {
+          "cpu": 0.1,
+          "memory": 0.15,
+          "application_io": 0.15,
+          "storage": 0.5,
+          "network": 0.1
+        }
       }
     ],
     "nodes": [
+      {
+        "id": "linux-pilot-sim-control-plane",
+        "clusterId": "linux-pilot-sim",
+        "description": "kind Kubernetes 控制节点；运行独立 Worker，不承载示例业务 Pod",
+        "role": "control-plane",
+        "scoreProfileRef": "general-v1",
+        "capacity": {
+          "cpuCores": 12,
+          "memoryBytes": 16819298304,
+          "storage": [
+            { "mount": "/", "medium": "virtual", "capacityBytes": 53687091200 }
+          ]
+        }
+      },
       {
         "id": "linux-pilot-sim-worker",
         "clusterId": "linux-pilot-sim",
@@ -32,7 +68,13 @@
         "capacity": {
           "cpuCores": 12,
           "memoryBytes": 16819298304,
-          "storage": [{ "mount": "/", "medium": "virtual", "capacityBytes": 53687091200 }]
+          "storage": [
+            {
+              "mount": "/",
+              "medium": "virtual",
+              "capacityBytes": 53687091200
+            }
+          ]
         }
       },
       {
@@ -44,7 +86,67 @@
         "capacity": {
           "cpuCores": 12,
           "memoryBytes": 16819298304,
-          "storage": [{ "mount": "/data", "medium": "virtual", "capacityBytes": 53687091200 }]
+          "storage": [
+            {
+              "mount": "/data",
+              "medium": "virtual",
+              "capacityBytes": 53687091200
+            }
+          ]
+        }
+      },
+      {
+        "id": "standalone-billing",
+        "clusterId": "standalone-sim",
+        "description": "billing 单体应用与独立 Worker 同机运行；Docker 容器模拟一台 Linux 主机",
+        "role": "billing",
+        "scoreProfileRef": "general-v1",
+        "capacity": {
+          "cpuCores": 1,
+          "memoryBytes": 536870912,
+          "storage": [
+            {
+              "mount": "/data",
+              "medium": "virtual",
+              "capacityBytes": 1073741824
+            }
+          ]
+        }
+      },
+      {
+        "id": "standalone-search",
+        "clusterId": "standalone-sim",
+        "description": "search 单体应用与独立 Worker 同机运行；Docker 容器模拟一台 Linux 主机",
+        "role": "search",
+        "scoreProfileRef": "general-v1",
+        "capacity": {
+          "cpuCores": 1,
+          "memoryBytes": 536870912,
+          "storage": [
+            {
+              "mount": "/data",
+              "medium": "virtual",
+              "capacityBytes": 1073741824
+            }
+          ]
+        }
+      },
+      {
+        "id": "standalone-reports",
+        "clusterId": "standalone-sim",
+        "description": "reports 单体应用与独立 Worker 同机运行；Docker 容器模拟一台 Linux 主机",
+        "role": "reports",
+        "scoreProfileRef": "general-v1",
+        "capacity": {
+          "cpuCores": 1,
+          "memoryBytes": 536870912,
+          "storage": [
+            {
+              "mount": "/data",
+              "medium": "virtual",
+              "capacityBytes": 1073741824
+            }
+          ]
         }
       }
     ],
@@ -54,7 +156,12 @@
         "clusterId": "linux-pilot-sim",
         "description": "库存查询与原子扣减；SQLite 写入及磁盘刷新",
         "criticality": "critical",
-        "match": { "type": "kubernetes-workload", "namespace": "linux-pilot-demo", "kind": "Deployment", "name": "catalog" },
+        "match": {
+          "type": "kubernetes-workload",
+          "namespace": "linux-pilot-demo",
+          "kind": "Deployment",
+          "name": "catalog"
+        },
         "dependsOn": []
       },
       {
@@ -62,12 +169,59 @@
         "clusterId": "linux-pilot-sim",
         "description": "跨节点调用库存后创建订单；两个副本分散在两个 worker 节点",
         "criticality": "critical",
-        "match": { "type": "kubernetes-workload", "namespace": "linux-pilot-demo", "kind": "Deployment", "name": "orders" },
-        "dependsOn": ["catalog"]
+        "match": {
+          "type": "kubernetes-workload",
+          "namespace": "linux-pilot-demo",
+          "kind": "Deployment",
+          "name": "orders"
+        },
+        "dependsOn": [
+          "catalog"
+        ]
+      },
+      {
+        "id": "monolith-billing",
+        "clusterId": "standalone-sim",
+        "description": "billing 单体服务，一台模拟主机一个进程实例",
+        "criticality": "high",
+        "match": {
+          "type": "host-process",
+          "hostId": "standalone-billing",
+          "comm": "pilot-billing"
+        },
+        "dependsOn": []
+      },
+      {
+        "id": "monolith-search",
+        "clusterId": "standalone-sim",
+        "description": "search 单体服务，一台模拟主机一个进程实例",
+        "criticality": "medium",
+        "match": {
+          "type": "host-process",
+          "hostId": "standalone-search",
+          "comm": "pilot-search"
+        },
+        "dependsOn": []
+      },
+      {
+        "id": "monolith-reports",
+        "clusterId": "standalone-sim",
+        "description": "reports 单体服务，一台模拟主机一个进程实例",
+        "criticality": "medium",
+        "match": {
+          "type": "host-process",
+          "hostId": "standalone-reports",
+          "comm": "pilot-reports"
+        },
+        "dependsOn": []
       }
     ],
     "systemScore": {
-      "weights": { "endToEnd": 0.50, "criticalServices": 0.30, "capacityAndResilience": 0.20 },
+      "weights": {
+        "endToEnd": 0.5,
+        "criticalServices": 0.3,
+        "capacityAndResilience": 0.2
+      },
       "criticalServiceMaxDelta": 10.0
     }
   }

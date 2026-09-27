@@ -8,7 +8,9 @@ import { usePlatform } from '../store'
 
 const LineChart = defineAsyncComponent(() => import('../components/LineChart.vue'))
 const platform = usePlatform()
-const { hostId, range, latest } = storeToRefs(platform)
+const { hostId, range, latest, deploymentMode } = storeToRefs(platform)
+// K8s 页面以 Pod/cgroup 与节点资源为入口；进程分类仅普通主机模式展示。
+const visibleCategories = computed(() => categories.filter((item) => deploymentMode.value === 'standalone' || item.id !== 'proc'))
 const category = ref<(typeof categories)[number]['id']>('cpu')
 const query = ref('')
 const chartMetric = ref<string>('cpu.busy_pct')
@@ -124,7 +126,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
   <div class="page-stack">
     <div class="page-intro"><div><h2>指标探索</h2><p>按资源类别筛选时序与当前样本；每条指标展示口径、来源和维度。</p></div><button class="button secondary" :disabled="!latestRows.length" @click="exportCsv"><Download :size="16" /> 导出当前列表</button></div>
     <div v-if="error" class="notice error">{{ error }}</div>
-    <div class="category-grid"><button v-for="item in categories" :key="item.id" class="category-tab" :class="{ active: category === item.id }" @click="category = item.id"><strong>{{ item.title }}</strong><small>{{ item.summary }}</small></button></div>
+    <div class="category-grid"><button v-for="item in visibleCategories" :key="item.id" class="category-tab" :class="{ active: category === item.id }" @click="category = item.id"><strong>{{ item.title }}</strong><small>{{ item.summary }}</small></button></div>
     <section class="panel"><div class="panel-header"><div><h3>{{ selected.title }}趋势</h3><p>{{ dimensionKey ? '按维度筛选，数据库端聚合约 180 个时间桶' : '主机级数据在数据库端聚合为约 180 个时间桶' }}</p></div><div class="metric-chart-controls"><select v-if="dimensionKey" v-model="selectedDimension" aria-label="图表维度" @change="loadChart"><option v-for="item in dimensions" :key="item.value" :value="item.value">{{ item.label }}</option></select><select v-model="chartMetric" aria-label="图表指标"><option v-for="name in chartNames" :key="name" :value="name">{{ metricTitle(name) }}</option></select></div></div>
       <LineChart :points="chartPoints" :names="[chartMetric]" :label-filter="labelFilter" :height="310" />
       <div v-if="!chartPoints.length" class="inline-empty">{{ dimensionKey ? '当前维度暂无时序数据，请选择其他对象或等待下一次采样。' : '当前类别暂无主机级时序。' }}</div>

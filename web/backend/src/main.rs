@@ -112,12 +112,13 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(infrastructure::topology_postgres::PostgresTopologyRepository::new(db.clone()));
     let repository = Arc::new(infrastructure::postgres::PostgresRepository::new(db));
     let metrics: Arc<dyn MetricRepository> = repository.clone();
+    let processes: Arc<dyn ProcessRepository> = repository.clone();
     let topology = Arc::new(TopologyApplication::new(
         topology_repository,
         metrics.clone(),
+        processes.clone(),
     ));
     let profiles: Arc<dyn ProfileRepository> = repository.clone();
-    let processes: Arc<dyn ProcessRepository> = repository.clone();
     let alerts: Arc<dyn AlertRepository> = repository;
     let app = Arc::new(Application::new(
         metrics,

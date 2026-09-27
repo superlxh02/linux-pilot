@@ -65,24 +65,9 @@ case "${1:-}" in
     "$kubectl_bin" --context "$context" -n linux-pilot-demo rollout status deployment/pilot-discovery --timeout=180s
     "$kubectl_bin" --context "$context" -n linux-pilot-demo exec deployment/catalog -- python -c \
       'import json,urllib.request; r=urllib.request.Request("http://127.0.0.1:8080/items",json.dumps({"sku":"pilot-demo","quantity":1000000}).encode(),{"Content-Type":"application/json"},method="POST"); print(urllib.request.urlopen(r).read().decode())'
-    # 配置版本只在首次导入；以后由用户显式增加 revision，避免覆盖调整。
-    PILOT_OPERATOR_TOKEN="$(token_from_env OPERATOR_TOKEN)" python3 - "$root/virtual_env/manifest.json" <<'PY'
-import json, os, sys, urllib.error, urllib.request
-base = "http://127.0.0.1:3000/api/v1/topology/manifest"
-headers = {"Authorization": "Bearer " + os.environ["PILOT_OPERATOR_TOKEN"], "Content-Type": "application/json"}
-try:
-    with urllib.request.urlopen(urllib.request.Request(base, headers=headers), timeout=10) as response:
-        existing = json.load(response)
-    if existing is not None:
-        print("已有拓扑配置；保留当前 revision，未覆盖")
-        sys.exit(0)
-    body = open(sys.argv[1], "rb").read()
-    with urllib.request.urlopen(urllib.request.Request(base, body, headers, method="PUT"), timeout=10) as response:
-        print("拓扑配置已导入:", response.read().decode())
-except urllib.error.URLError as error:
-    raise SystemExit(f"拓扑导入失败：{error}")
-PY
-    echo '集群就绪：http://127.0.0.1:18080/health；控制台：http://127.0.0.1:3000'
+    PILOT_OPERATOR_TOKEN="$(token_from_env OPERATOR_TOKEN)" \
+      python3 "$root/virtual_env/import_manifest.py" "$root/virtual_env/manifest.json"
+    echo '集群就绪：http://127.0.0.1:18080/health；控制台：http://localhost:3000'
     ;;
   status)
     "$kubectl_bin" --context "$context" get nodes -o wide

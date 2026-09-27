@@ -3,7 +3,7 @@
 //! 每次查询只用最近窗口数据；缺失应用 SLI 时整体业务分保持 null。
 //! 节点分和服务基础设施分仍可解释地返回，避免伪造业务健康度。
 
-use super::ports::{MetricRepository, TopologyRepository};
+use super::ports::{MetricRange, MetricRepository, ProcessRepository, TopologyRepository};
 use anyhow::{Result, ensure};
 use linux_pilot_model::Metric;
 use linux_pilot_scoring::{
@@ -19,6 +19,7 @@ use std::{
 pub struct TopologyApplication {
     repository: Arc<dyn TopologyRepository>,
     metrics: Arc<dyn MetricRepository>,
+    processes: Arc<dyn ProcessRepository>,
     scorer: RuleBasedScoreEngine,
 }
 
@@ -26,10 +27,12 @@ impl TopologyApplication {
     pub fn new(
         repository: Arc<dyn TopologyRepository>,
         metrics: Arc<dyn MetricRepository>,
+        processes: Arc<dyn ProcessRepository>,
     ) -> Self {
         Self {
             repository,
             metrics,
+            processes,
             scorer: RuleBasedScoreEngine::default(),
         }
     }
@@ -102,7 +105,7 @@ impl TopologyApplication {
                 &measurements,
                 &profile.weights,
             );
-            nodes.push(json!({"id":node.id,"cluster_id":node.cluster_id,"role":node.role,"description":node.description,"capacity":node.capacity,"score":score.value,"coverage":score.coverage,"scenario":profile.scenario,"profile":profile.id,"factors":score.factors,"missing":score.missing}));
+            nodes.push(json!({"id":node.id,"cluster_id":node.cluster_id,"role":node.role,"description":node.description,"capacity":node.capacity,"score":score.value,"coverage":score.coverage,"online":!overview.is_empty(),"scenario":profile.scenario,"profile":profile.id,"factors":score.factors,"missing":score.missing}));
         }
 
         let mut discovered = HashMap::new();
@@ -113,8 +116,56 @@ impl TopologyApplication {
             );
         }
         let mut services = Vec::new();
-        let mut service_scores = Vec::new();
+        let mut service_scores: Vec<(&str, f64, &str)> = Vec::new();
         for service in &manifest.spec.services {
+            if let ServiceSelector::HostProcess { host_id, comm } = &service.selector {
+                // 单体模式下应用身份绑定主机与 comm，不绑定易复用的 PID。
+                // 查询当前进程实例后再用 pid+start_ticks 获取本窗口明细。
+                let process = self
+                    .processes
+                    .list_processes(host_id, now - 30_000)
+                    .await?
+                    .into_iter()
+                    .find(|item| item.comm == *comm);
+                let mut metrics = BTreeMap::new();
+                let mut instances = Vec::new();
+                if let Some(process) = process {
+                    let labels = BTreeMap::from([
+                        ("pid".to_owned(), process.pid.to_string()),
+                        ("start_ticks".to_owned(), process.start_ticks.to_string()),
+                    ]);
+                    for metric in self
+                        .metrics
+                        .metrics(MetricRange {
+                            host_id,
+                            category: Some("proc"),
+                            from: now - 30_000,
+                            to: now,
+                            limit: 1000,
+                            aggregate_only: false,
+                            step_ms: None,
+                            labels: Some(&labels),
+                        })
+                        .await?
+                    {
+                        metrics.insert(metric.name, metric.value);
+                    }
+                    instances.push(json!({"host_id":host_id,"pid":process.pid,"start_ticks":process.start_ticks,"comm":process.comm,"cpu_pct":process.cpu_pct,"rss_bytes":process.rss_bytes,"metrics":metrics}));
+                }
+                let cpu = metrics.get("proc.cpu_pct").copied().unwrap_or(0.0) / 100.0;
+                let memory = metrics.get("proc.rss_bytes").copied().unwrap_or(0.0);
+                let read = metrics.get("proc.read_bytes_per_s").copied().unwrap_or(0.0);
+                let write = metrics
+                    .get("proc.write_bytes_per_s")
+                    .copied()
+                    .unwrap_or(0.0);
+                // eBPF Socket 字节是进程系统调用口径，并非网卡线速；仅在
+                // 探针实际提供该指标时显示，缺测保持 null。
+                let network_rx = metrics.get("proc.socket_rx_bytes_per_s").copied();
+                let network_tx = metrics.get("proc.socket_tx_bytes_per_s").copied();
+                services.push(json!({"id":service.id,"cluster_id":service.cluster_id,"criticality":service.criticality,"description":service.description,"host_id":host_id,"instance_count":instances.len(),"instances":instances,"resource_score":null,"cpu_cores":cpu,"memory_bytes":memory,"read_bytes_per_s":read,"write_bytes_per_s":write,"network_rx_bytes_per_s":network_rx,"network_tx_bytes_per_s":network_tx,"sli_status":"not_configured"}));
+                continue;
+            }
             let matched: Vec<&PodObservation> = discovered
                 .get(&service.cluster_id)
                 .into_iter()
@@ -172,31 +223,71 @@ impl TopologyApplication {
                 None
             };
             if let Some(value) = resource_score {
-                service_scores.push((value, service.criticality.as_str()));
+                service_scores.push((&service.cluster_id, value, service.criticality.as_str()));
             }
             services.push(json!({"id":service.id,"cluster_id":service.cluster_id,"criticality":service.criticality,"description":service.description,"pod_count":pods.len(),"covered_pods":scored,"resource_score":resource_score,"cpu_cores":cpu_cores,"memory_bytes":memory_bytes,"read_bytes_per_s":read_bytes_per_s,"write_bytes_per_s":write_bytes_per_s,"network_rx_bytes_per_s":if network_samples>0 {Some(network_rx_bytes_per_s)} else {None},"network_tx_bytes_per_s":if network_samples>0 {Some(network_tx_bytes_per_s)} else {None},"network_covered_pods":network_samples,"pods":pods,"sli_status":"not_configured"}));
         }
-        // 关键依赖完全失联时不能用其他健康服务的平均值给出高分。
-        let critical_expected = manifest
+        // 集群分分别计算。Kubernetes 从服务副本归属汇总；普通主机集群
+        // 从完整节点评分汇总。两类数据不能混成一个无语义的全局平均数。
+        let mut clusters = Vec::new();
+        for cluster in &manifest.spec.clusters {
+            let cluster_nodes: Vec<_> = nodes
+                .iter()
+                .filter(|node| node["cluster_id"] == cluster.id)
+                .collect();
+            let online_nodes = cluster_nodes
+                .iter()
+                .filter(|node| node["online"] == true)
+                .count();
+            let score = if cluster.cluster_type == "kubernetes" {
+                let expected = manifest
+                    .spec
+                    .services
+                    .iter()
+                    .filter(|service| service.cluster_id == cluster.id)
+                    .count();
+                let covered: Vec<_> = service_scores
+                    .iter()
+                    .filter(|(cluster_id, _, _)| *cluster_id == cluster.id)
+                    .map(|(_, value, level)| (*value, *level))
+                    .collect();
+                if expected > 0 && covered.len() == expected {
+                    infrastructure_score(
+                        &covered,
+                        manifest.spec.system_score.critical_service_max_delta,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                let values: Vec<f64> = cluster_nodes
+                    .iter()
+                    .filter_map(|node| node["score"].as_f64())
+                    .collect();
+                if !values.is_empty() && values.len() == cluster_nodes.len() {
+                    Some(values.iter().sum::<f64>() / values.len() as f64)
+                } else {
+                    None
+                }
+            };
+            clusters.push(json!({"id":cluster.id,"type":cluster.cluster_type,"node_count":cluster_nodes.len(),"online_nodes":online_nodes,"service_count":manifest.spec.services.iter().filter(|service| service.cluster_id == cluster.id).count(),"resource_score":score}));
+        }
+        let infra = clusters
+            .iter()
+            .find(|cluster| cluster["type"] == "kubernetes")
+            .and_then(|cluster| cluster["resource_score"].as_f64());
+        let k8s_services = manifest
             .spec
             .services
             .iter()
-            .filter(|service| service.criticality == "critical")
+            .filter(|service| {
+                manifest.spec.clusters.iter().any(|cluster| {
+                    cluster.id == service.cluster_id && cluster.cluster_type == "kubernetes"
+                })
+            })
             .count();
-        let critical_covered = service_scores
-            .iter()
-            .filter(|(_, level)| *level == "critical")
-            .count();
-        let infra = if critical_covered == critical_expected {
-            infrastructure_score(
-                &service_scores,
-                manifest.spec.system_score.critical_service_max_delta,
-            )
-        } else {
-            None
-        };
         Ok(
-            json!({"configured":true,"manifest_id":manifest.metadata.id,"revision":manifest.metadata.revision,"time_ms":now,"nodes":nodes,"services":services,"infrastructure_score":infra,"overall_score":null,"overall_status":"waiting_for_end_to_end_sli","service_coverage":if manifest.spec.services.is_empty(){0.0}else{service_scores.len() as f64 / manifest.spec.services.len() as f64}}),
+            json!({"configured":true,"manifest_id":manifest.metadata.id,"revision":manifest.metadata.revision,"time_ms":now,"clusters":clusters,"nodes":nodes,"services":services,"infrastructure_score":infra,"overall_score":null,"overall_status":"waiting_for_end_to_end_sli","service_coverage":if k8s_services == 0 {0.0}else{service_scores.len() as f64 / k8s_services as f64}}),
         )
     }
 }
@@ -210,6 +301,7 @@ fn matches_pod(selector: &ServiceSelector, pod: &PodObservation) -> bool {
         } => {
             pod.namespace == *namespace && pod.workload_kind == *kind && pod.workload_name == *name
         }
+        ServiceSelector::HostProcess { .. } => false,
         ServiceSelector::SystemdUnit { .. } => false,
     }
 }

@@ -6,14 +6,14 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { Activity, ArrowRight, Bell, ChartNoAxesCombined, CircleHelp, Gauge, LayoutDashboard, LockKeyhole, LogOut, RefreshCw, Server, ShieldCheck, UsersRound, ListTree, Network } from '@lucide/vue'
+import { Activity, ArrowRight, Bell, ChartNoAxesCombined, CircleHelp, Gauge, LayoutDashboard, LockKeyhole, LogOut, RefreshCw, Server, ShieldCheck, UsersRound, ListTree, Network, Settings2 } from '@lucide/vue'
 import { usePlatform } from './store'
 import { request } from './api'
 
 const route = useRoute()
 const router = useRouter()
 const platform = usePlatform()
-const { hosts, hostId, role, account, connection, range, authenticated, error } = storeToRefs(platform)
+const { hostId, role, account, connection, range, authenticated, error, deploymentMode, visibleHosts } = storeToRefs(platform)
 const authMode = ref<'login' | 'register'>('login')
 const authEmail = ref('')
 const authPassword = ref('')
@@ -26,19 +26,38 @@ const resendSeconds = ref(0)
 let refreshTimer: number | undefined
 let codeTimer: number | undefined
 
-const navigation = [
-  { path: '/overview', label: '总览', icon: LayoutDashboard },
-  { path: '/hosts', label: '节点', icon: Server },
-  { path: '/cluster', label: '集群与服务', icon: Network },
-  { path: '/metrics', label: '指标探索', icon: Activity },
+const kubernetesNavigation = [
+  { path: '/k8s', label: '集群总览', icon: LayoutDashboard },
+  { path: '/services', label: '微服务', icon: Network },
+  { path: '/nodes', label: 'Kubernetes 节点', icon: Server },
+  { path: '/node-overview', label: '节点详情', icon: Gauge },
+  { path: '/metrics', label: '节点指标', icon: Activity },
+  { path: '/alerts', label: '告警', icon: Bell },
+  { path: '/topology', label: '拓扑配置', icon: Settings2 }
+]
+const standaloneNavigation = [
+  { path: '/standalone', label: '集群总览', icon: LayoutDashboard },
+  { path: '/hosts', label: '主机节点', icon: Server },
+  { path: '/overview', label: '节点详情', icon: Gauge },
+  { path: '/metrics', label: '节点指标', icon: Activity },
   { path: '/processes', label: '进程监控', icon: ListTree },
   { path: '/scores', label: '场景评分', icon: Gauge },
   { path: '/profiles', label: '性能剖析', icon: ChartNoAxesCombined },
-  { path: '/alerts', label: '告警', icon: Bell }
+  { path: '/alerts', label: '告警', icon: Bell },
+  { path: '/topology', label: '拓扑配置', icon: Settings2 }
 ]
-const visibleNavigation = computed(() => role.value === 'admin' ? [...navigation, { path: '/users', label: '用户管理', icon: UsersRound }] : navigation)
+const visibleNavigation = computed(() => {
+  const base = deploymentMode.value === 'kubernetes' ? kubernetesNavigation : standaloneNavigation
+  return role.value === 'admin' ? [...base, { path: '/users', label: '用户管理', icon: UsersRound }] : base
+})
 const pageTitle = computed(() => visibleNavigation.value.find((item) => item.path === route.path)?.label || '总览')
-const onlineCount = computed(() => hosts.value.filter((host) => host.online).length)
+const onlineCount = computed(() => visibleHosts.value.filter((host) => host.online).length)
+const showNodeSelector = computed(() => ['/overview', '/node-overview', '/metrics', '/processes', '/scores', '/profiles'].includes(route.path))
+
+function selectDeploymentMode(mode: 'kubernetes' | 'standalone') {
+  platform.setDeploymentMode(mode)
+  void router.push(mode === 'kubernetes' ? '/k8s' : '/standalone')
+}
 
 async function submitAccount() {
   // 登录与注册共用表单容器，但注册必须先通过独立邮件通道拿到验证码。
@@ -49,7 +68,7 @@ async function submitAccount() {
     else await platform.register(authEmail.value, displayName.value, authPassword.value, verificationCode.value)
     authPassword.value = ''
     verificationCode.value = ''
-    await router.replace('/overview')
+    await router.replace(deploymentMode.value === 'kubernetes' ? '/k8s' : '/standalone')
   }
   catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
   finally { loggingIn.value = false }
@@ -97,7 +116,7 @@ async function refresh() {
 
 onMounted(() => {
   void platform.restore().then(() => {
-    if (authenticated.value && route.path === '/login') void router.replace('/overview')
+    if (authenticated.value && route.path === '/login') void router.replace(deploymentMode.value === 'kubernetes' ? '/k8s' : '/standalone')
     if (!authenticated.value && route.path !== '/login') void router.replace('/login')
   })
   void request<{ github: boolean, google: boolean, local_mailbox: string | null }>('/api/v1/auth/providers')
@@ -156,6 +175,10 @@ onUnmounted(() => {
   <div v-else class="app-layout">
     <aside class="sidebar">
       <div class="product-lockup"><div class="product-mark"><img src="/logo.svg" alt="" /></div><div><strong>Linux-Pilot</strong><span>性能观测平台</span></div></div>
+      <div class="mode-switch" role="group" aria-label="部署模式">
+        <button type="button" :class="{ active: deploymentMode === 'kubernetes' }" @click="selectDeploymentMode('kubernetes')">Kubernetes</button>
+        <button type="button" :class="{ active: deploymentMode === 'standalone' }" @click="selectDeploymentMode('standalone')">普通主机</button>
+      </div>
       <div class="nav-group-label">工作台</div>
       <nav class="main-nav" aria-label="主导航">
         <RouterLink v-for="item in visibleNavigation" :key="item.path" :to="item.path" :class="{ active: route.path === item.path }">
@@ -164,7 +187,7 @@ onUnmounted(() => {
       </nav>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-summary">
-        <div class="summary-line"><span>在线节点</span><strong>{{ onlineCount }} / {{ hosts.length }}</strong></div>
+        <div class="summary-line"><span>在线节点</span><strong>{{ onlineCount }} / {{ visibleHosts.length }}</strong></div>
         <div class="summary-line"><span>数据通道</span><strong :class="connection === '实时连接' ? 'text-success' : 'text-warning'">{{ connection }}</strong></div>
       </div>
       <RouterLink class="sidebar-help" to="/metrics"><CircleHelp :size="16" /> 指标口径</RouterLink>
@@ -174,8 +197,8 @@ onUnmounted(() => {
       <header class="topbar">
         <div class="page-heading"><div class="breadcrumb">Linux-Pilot / {{ pageTitle }}</div><h1>{{ pageTitle }}</h1></div>
         <div class="toolbar">
-          <label class="toolbar-field"><Server :size="15" /><select :value="hostId" aria-label="选择节点" @change="platform.setHost(($event.target as HTMLSelectElement).value)">
-            <option value="" disabled>选择节点</option><option v-for="host in hosts" :key="host.id" :value="host.id">{{ host.hostname }}</option>
+          <label v-if="showNodeSelector" class="toolbar-field"><Server :size="15" /><select :value="hostId" aria-label="选择节点" @change="platform.setHost(($event.target as HTMLSelectElement).value)">
+            <option value="" disabled>选择节点</option><option v-for="host in visibleHosts" :key="host.id" :value="host.id">{{ host.hostname }}</option>
           </select></label>
           <label class="toolbar-field"><span class="toolbar-label">时间</span><select v-model="range" aria-label="时间范围"><option value="15m">最近 15 分钟</option><option value="1h">最近 1 小时</option><option value="6h">最近 6 小时</option><option value="24h">最近 24 小时</option></select></label>
           <button class="icon-button" title="刷新" aria-label="刷新" @click="refresh"><RefreshCw :size="17" /></button>

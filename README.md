@@ -18,7 +18,7 @@ Linux-Pilot 在目标 Linux 主机上持续采集性能指标和内核信号，�
 | 内核与剖析 | Aya eBPF 的 TCP、块 I/O 与调度信号；按需 perf CPU 调用栈和火焰图 |
 | 可靠传输 | Worker 主动建立 gRPC/HTTP2 双向流；本地磁盘缓冲、ACK、断线回放和批次去重 |
 | 观测控制台 | 节点总览、按挂载点与 cgroup 画图、用户态进程清单、固定监控服务进程、五场景评分、告警和性能剖析；WebSocket 实时更新 |
-| 集群实验环境 | `virtual_env/` 的 kind 三节点 Kubernetes、订单/库存真实服务、DaemonSet Worker、Pod 归属与跨节点资源快照 |
+| 双模式实验环境 | `virtual_env/standalone/` 三个单体主机容器与各自 Worker；`virtual_env/` kind 三 Node Kubernetes 与每 Node 一个 Worker；可在浅色 UI 中切换 |
 | 账号 | 邮箱验证码注册、Argon2id 密码、HttpOnly 会话；管理员用户管理、角色分配和操作记录 |
 
 指标的单位、来源、含义及诊断用途见 [完整指标字典](web/docs/metrics.md)。该字典也标出了尚未实现的候选指标；页面会对缺失数据标明缺失，不会显示假零值。
@@ -41,7 +41,7 @@ web/                       独立 Cargo 工作区
   site/                    项目官网静态页面
   docs/                    指标与认证文档
 compose.yaml               只包含 Web 前端、Web 后端和 PostgreSQL
-virtual_env/               本地三节点 Kubernetes、真实示例服务和负载模拟
+virtual_env/               普通主机与 kind Kubernetes 双模式模拟、真实服务和负载脚本
 ```
 
 Worker 与 Web **没有根目录 Cargo 工作区**，可分别拷贝、构建和部署。为保证独立性，版本化契约在两边各保留一份；修改协议后运行 `bash web/scripts/check-contracts.sh` 检查副本一致。Protobuf 的 `po.agent.v1` 命名空间为兼容现有 v1 数据流保留，产品名称已改为 Linux-Pilot。
@@ -96,18 +96,18 @@ docker rm -f linux-pilot-cpu-demo
 
 ## 开发
 
-### 三节点 Kubernetes 实验环境
+### 本地双模式实验环境
 
-macOS + Docker Desktop/OrbStack 上可运行 `./virtual_env/manage.sh up` 创建 1 个控制节点和 2 个工作节点，构建并部署订单、库存服务及每节点 Worker。安装的 `kind` 和兼容版本 `kubectl` 由脚本使用；完整步骤、资源边界、拓扑 JSON 与评分口径见 [实验环境说明](virtual_env/README.md)。
+macOS + Docker Desktop/OrbStack 上可同时运行三台单体主机的 Docker 模拟和 1 控制面 + 2 工作 Node 的 kind 集群。前者每个容器有一个服务和一个 Worker；后者每个 Node 包括控制面都有一个 Worker。完整部署、数据边界和负载接口见 [实验环境说明](virtual_env/README.md)。
 
 ```bash
+./virtual_env/standalone/manage.sh up
+./virtual_env/standalone/manage.sh load --duration 60 --rate 6 --mode mixed
 ./virtual_env/manage.sh up
-./virtual_env/manage.sh status
 ./virtual_env/manage.sh load --duration 60 --rate 4 --mode mixed
-./virtual_env/manage.sh down
 ```
 
-这些 kind 节点共享 Docker Linux VM 的物理资源，只用于验证 Kubernetes 归属和跨节点功能，不代表三台独立服务器的基准测试结果。
+在 Web 左侧切换「普通主机」与「Kubernetes」。前者提供节点、进程与单体服务视图；后者提供集群、微服务、Pod 副本与 Node 视图。「拓扑配置」可视化编辑节点描述、容量、评分场景和服务归属，并可导入/导出 [JSON 配置](virtual_env/manifest.json)。两套模拟都共享 Mac 的 Docker Linux VM，不用于独立物理机性能基准测试。
 
 Rust 1.98 或更高版本、Node.js 24 可用于本地开发。两端各自运行测试：
 

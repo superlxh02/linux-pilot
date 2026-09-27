@@ -24,6 +24,16 @@ Worker 每秒读取基础指标，先把批次写入持久目录，再尝试通�
 
 进程清单每 15 秒通过同一可靠批次上传，在事务内更新 `process_inventory` 当前态表，不进入七天原始指标表。后端把 `process_watches` 中最多 20 个固定监控对象作为完整配置，通过双向 gRPC 流下发；Worker 重连时重新同步。每个对象绑定 PID 与 `/proc/<pid>/stat` 的启动 tick，PID 复用不会混入旧进程时序。进程详细指标仍按 Worker 明细采样频率写入常规指标表；文件系统、cgroup 和进程图表使用标签过滤并由 PostgreSQL 按时间桶聚合。
 
+## 双模式拓扑与评分
+
+版本化 `TopologyManifest` 同时描述 Kubernetes 集群和普通主机集群。配置层保存 Cluster、Node 的角色与声明容量、评分 Profile、Service 的稳定选择器；采集数据、Pod UID 和当前进程 PID 属于运行时事实，不能写成静态配置。可视化编辑器与 JSON 导入/导出使用同一份契约，更新采用 revision 乐观锁。
+
+Kubernetes 模式为每个 Node 部署一个 Worker DaemonSet Pod。本地 kind 实验包括控制面 Node；生产环境是否监控控制面取决于污点与权限策略。只读发现器将 Deployment 身份映射到动态 Pod UID；服务聚合按 Pod 父 cgroup 取一次 CPU、内存和 I/O，网络取 Pod 命名空间。一个 Node 可承载多个服务，一个服务可跨 Node。页面以集群和服务为入口，Node 详情用于定位承载位置；不展示进程监控入口。
+
+普通主机模式按 `hostId + comm` 将单体服务绑定到运行中的用户态进程，时序查询仍使用 `PID + start_ticks` 防止 PID 复用。页面以集群、主机和进程为入口。本地模拟的三个 Docker 容器各有一份 Worker 与单体应用，但共享同一个 Linux VM 内核，因而不能当作独立物理机比较绝对性能。
+
+节点分使用其 Profile 的五维确定性权重；Kubernetes 集群资源分聚合有完整 Pod 覆盖的服务，普通主机集群资源分聚合有完整指标的节点。缺失采集信号保持空值。端到端成功率、延迟和 SLO 尚未接入时，业务整体分为 `null`，避免把资源健康误报为业务健康。
+
 ## Web 后端分层
 
 | 层 | 目录 | 责任 |

@@ -349,3 +349,92 @@ label { color: #65748a; font-size: 12px }
   .panel { padding: 16px }
   .job-summary { grid-template-columns: repeat(2, 1fr) }
 }
+
+/* 两套工作台共用浅色视觉语言；导航模式切换保持显眼但不抢主内容。 */
+.mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 22px 10px 16px; padding: 4px; border: 1px solid #dfe7f1; border-radius: 9px; background: #f1f5fa }
+.mode-switch button { border: 0; border-radius: 6px; background: transparent; color: #74839b; padding: 9px 4px; font-size: 11px; font-weight: 710; white-space: nowrap; cursor: pointer }
+.mode-switch button.active { background: #fff; color: #2861b7; box-shadow: 0 1px 5px #233d611c }
+.mode-switch button:focus-visible, .service-picker button:focus-visible, .pod-picker button:focus-visible, .node-strip-item:focus-visible, .standalone-node-card:focus-visible { outline: 2px solid #6694e8; outline-offset: 2px }
+.scope-note { margin: 2px 0 0; padding: 10px 14px; border: 1px solid #dce8f5; border-radius: 7px; background: #f6f9fd; color: #70829c; font-size: 11px; line-height: 1.6 }
+.cluster-success { background: #effaf5; color: #187257; border-color: #ccebdc }
+.text-danger { color: #c65454 !important }
+
+/* Kubernetes：服务卡片先展示健康、评分与资源；Node 以紧凑列表承载导航。 */
+.service-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 14px }
+.service-summary-card { display: flex; flex-direction: column; min-width: 0; padding: 17px; border: 1px solid #dfe7f1; border-radius: 9px; background: #fff; color: inherit; text-decoration: none; transition: border-color .15s, box-shadow .15s, transform .15s }
+.service-summary-card:hover { border-color: #a9c5ef; box-shadow: 0 9px 24px #385b8c12; transform: translateY(-2px) }
+.service-summary-top, .service-summary-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px }
+.service-icon { display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; background: #edf4ff; color: #3b6bc0 }
+.service-summary-card h4 { margin: 15px 0 5px; color: #29415f; font-size: 16px }
+.service-summary-card p { margin: 0 0 16px; min-height: 32px; color: #8493a7; font-size: 11px; line-height: 1.55 }
+.service-summary-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: auto; padding: 12px 0; border-top: 1px solid #edf1f6 }
+.service-summary-stats span { color: #91a0b2; font-size: 10px }
+.service-summary-stats b { display: block; margin-top: 5px; color: #364c68; font-size: 12px; white-space: nowrap }
+.service-summary-foot { padding-top: 10px; color: #3f72c3; font-size: 11px; font-weight: 680 }
+.node-strip { display: grid; gap: 8px }
+.node-strip-item { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 14px; width: 100%; padding: 12px 14px; border: 1px solid #e6ecf3; border-radius: 7px; background: #fbfcfe; text-align: left; cursor: pointer }
+.node-strip-item:hover { border-color: #afc7e9; background: #f5f9ff }
+.node-strip-item .status-dot { margin: 0 }
+.node-strip-item span:nth-child(2) { min-width: 0 }
+.node-strip-item strong, .node-strip-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.node-strip-item strong { color: #3b506d; font-size: 12px }
+.node-strip-item small { margin-top: 4px; color: #99a5b5; font-size: 10px }
+.node-strip-item b { color: #4270b9; font-size: 17px }
+.service-picker { display: flex; gap: 8px; flex-wrap: wrap }
+.service-picker button { display: grid; gap: 4px; min-width: 165px; padding: 11px 14px; border: 1px solid #dfe7f0; border-radius: 7px; background: #fff; color: #4b607b; text-align: left; cursor: pointer }
+.service-picker button.active { border-color: #85abe8; background: #f0f6ff; color: #2d63b9 }
+.service-picker span { font-size: 12px; font-weight: 730 }
+.service-picker small { color: #92a0b3; font-size: 10px }
+.service-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px }
+.service-heading h3 { margin: 5px 0; color: #2c405b; font-size: 21px }
+.service-heading p { margin: 0; color: #8998aa; font-size: 12px }
+.pod-picker { display: grid; gap: 7px }
+.pod-picker button { display: grid; grid-template-columns: 8px minmax(0, 1.2fr) minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px; border: 1px solid #e4ebf3; border-radius: 7px; background: #fff; text-align: left; cursor: pointer }
+.pod-picker button.active { background: #f1f6ff; border-color: #a8c4ee }
+.pod-picker .status-dot { margin: 0 }
+.pod-picker strong, .pod-picker small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.pod-picker strong { color: #415673; font-size: 12px }
+.pod-picker small { color: #91a0b2; font-size: 10px }
+.pod-picker b { color: #356dbd; font-size: 14px }
+.pod-metric-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 11px }
+.pod-metric-strip > div { padding: 13px 15px; border: 1px solid #e0e8f2; border-radius: 8px; background: #fff }
+.pod-metric-strip span, .pod-metric-strip strong { display: block }
+.pod-metric-strip span { color: #91a0b2; font-size: 10px }
+.pod-metric-strip strong { margin-top: 6px; color: #344d6f; font-size: 16px }
+
+/* 普通主机：每张主机卡同时展示单体服务归属和当前资源使用。 */
+.standalone-node-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); gap: 13px }
+.standalone-node-card { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 17px; border: 1px solid #e0e8f1; border-radius: 8px; background: #fff; text-align: left; cursor: pointer }
+.standalone-node-card:hover { border-color: #a8c4e8; box-shadow: 0 8px 20px #3b608b10 }
+.standalone-node-head { display: flex; align-items: center; gap: 8px }
+.standalone-node-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #38506e; font-size: 13px }
+.standalone-node-head .badge { margin-left: auto }
+.standalone-node-card p { margin: 0; min-height: 32px; color: #92a0b1; font-size: 11px; line-height: 1.55 }
+.standalone-node-score { display: flex; justify-content: space-between; align-items: baseline; padding-top: 10px; border-top: 1px solid #eef2f7; color: #8797aa; font-size: 11px }
+.standalone-node-score b { color: #3b70bd; font-size: 23px }
+.standalone-service-line { display: flex; justify-content: space-between; gap: 8px; font-size: 11px }
+.standalone-service-line strong { color: #435a78 }
+.standalone-service-line span { color: #8c9baf }
+.standalone-node-metrics { display: flex; flex-wrap: wrap; gap: 5px }
+.standalone-node-metrics span { padding: 5px 7px; border-radius: 5px; background: #f3f7fb; color: #70839c; font-size: 10px }
+
+/* 拓扑编辑器：结构化字段覆盖常用配置，完整 manifest 可通过 JSON 往返。 */
+.topology-editor .panel { overflow: visible }
+.config-summary { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 13px 16px; border: 1px solid #dbe6f2; border-radius: 8px; background: #f5f9fe; color: #4a6587; font-size: 12px }
+.config-summary svg { color: #5684ca }
+.config-summary small { margin-left: auto; color: #91a2b5; font-size: 10px }
+.config-card-list { display: grid; gap: 12px }
+.config-card { padding: 16px; border: 1px solid #e2e9f1; border-radius: 8px; background: #fcfdff }
+.config-card-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 13px; color: #405775; font-size: 12px }
+.config-form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px }
+.config-form-grid label, .config-weight-grid label { display: grid; align-content: start; gap: 6px; color: #6d819b; font-size: 11px; font-weight: 650 }
+.config-form-grid .config-wide { grid-column: span 2 }
+.config-form-grid input, .config-form-grid select, .config-weight-grid input { width: 100%; min-width: 0; height: 36px; padding: 0 10px; border: 1px solid #dbe5f0; border-radius: 6px; background: #fff; color: #354c6c; font-size: 12px; outline: none }
+.config-form-grid input:focus, .config-form-grid select:focus, .config-weight-grid input:focus { border-color: #86abe7; box-shadow: 0 0 0 3px #dceafd }
+.config-form-grid input:disabled, .config-form-grid select:disabled, .config-weight-grid input:disabled { background: #f6f8fa; color: #6f8199 }
+.config-weight-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 11px; margin: 15px 0 8px }
+.file-button { position: relative; overflow: hidden; cursor: pointer }
+.file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer }
+.button.danger { color: #c05c5c }
+@media (max-width: 1000px) { .config-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) } .config-weight-grid { grid-template-columns: repeat(3, minmax(0, 1fr)) } }
+@media (max-width: 700px) { .mode-switch { display: inline-grid; width: min(240px, 100%); margin: 8px 0 } .service-summary-stats { grid-template-columns: repeat(3, minmax(0, 1fr)) } .pod-metric-strip { grid-template-columns: repeat(2, 1fr) } .config-form-grid { grid-template-columns: 1fr } .config-form-grid .config-wide { grid-column: auto } .config-weight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) } .pod-picker button { grid-template-columns: 8px minmax(0, 1fr) auto } .pod-picker small { display: none } }

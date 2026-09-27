@@ -6,11 +6,14 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { request, setToken, token, type Host, type Metric, type Score } from './api'
+import type { DeploymentMode, TopologyManifest } from './topology'
 
 const rangeLength: Record<string, number> = { '15m': 900_000, '1h': 3_600_000, '6h': 21_600_000, '24h': 86_400_000 }
 
 export const usePlatform = defineStore('platform', () => {
   const hosts = ref<Host[]>([])
+  const deploymentMode = ref<DeploymentMode>(localStorage.getItem('pilot-deployment-mode') === 'standalone' ? 'standalone' : 'kubernetes')
+  const topologyManifest = ref<TopologyManifest | null>(null)
   const hostId = ref(localStorage.getItem('po-host-id') || '')
   const latest = ref<Record<string, number>>({})
   const scores = ref<Record<string, Score>>({})
@@ -21,6 +24,12 @@ export const usePlatform = defineStore('platform', () => {
   const error = ref('')
   const authenticated = computed(() => role.value !== '')
   const selectedHost = computed(() => hosts.value.find((item) => item.id === hostId.value))
+  const activeCluster = computed(() => topologyManifest.value?.spec.clusters.find((cluster) => cluster.type === deploymentMode.value))
+  const visibleHosts = computed(() => {
+    if (!topologyManifest.value || !activeCluster.value) return hosts.value
+    const ids = new Set(topologyManifest.value.spec.nodes.filter((node) => node.clusterId === activeCluster.value?.id).map((node) => node.id))
+    return hosts.value.filter((host) => ids.has(host.id))
+  })
   let socket: WebSocket | null = null
   let retryTimer: number | undefined
 
@@ -36,6 +45,7 @@ export const usePlatform = defineStore('platform', () => {
     role.value = result.role
     account.value = { email: result.email || null, display_name: result.display_name || null }
     error.value = ''
+    await loadTopology()
     await loadHosts()
     connect()
   }
@@ -79,6 +89,7 @@ export const usePlatform = defineStore('platform', () => {
     role.value = ''
     account.value = { email: null, display_name: null }
     hosts.value = []
+    topologyManifest.value = null
     latest.value = {}
     scores.value = {}
     if (retryTimer) window.clearTimeout(retryTimer)
@@ -90,8 +101,19 @@ export const usePlatform = defineStore('platform', () => {
   async function loadHosts() {
     hosts.value = await request<Host[]>('/api/v1/hosts')
     // 浏览器可能记住已经离线的节点。首次打开优先展示在线数据，用户手动切换后仍可查看离线历史。
-    const saved = hosts.value.find((host) => host.id === hostId.value)
-    if (!saved || !saved.online) setHost(hosts.value.find((host) => host.online)?.id || hosts.value[0]?.id || '')
+    const saved = visibleHosts.value.find((host) => host.id === hostId.value)
+    if (!saved || !saved.online) setHost(visibleHosts.value.find((host) => host.online)?.id || visibleHosts.value[0]?.id || '')
+  }
+
+  async function loadTopology() {
+    topologyManifest.value = await request<TopologyManifest | null>('/api/v1/topology/manifest')
+  }
+
+  function setDeploymentMode(mode: DeploymentMode) {
+    deploymentMode.value = mode
+    localStorage.setItem('pilot-deployment-mode', mode)
+    const next = visibleHosts.value.find((host) => host.online) || visibleHosts.value[0]
+    setHost(next?.id || '')
   }
 
   function setHost(id: string) {
@@ -162,6 +184,7 @@ export const usePlatform = defineStore('platform', () => {
   }
 
   return { hosts, hostId, latest, scores, role, account, connection, range, error, authenticated,
+    deploymentMode, topologyManifest, activeCluster, visibleHosts, setDeploymentMode, loadTopology,
     selectedHost, timeWindow, login, register, sendCode, restore, logout, loadHosts, setHost, refreshOverview,
     queryMetrics, queryScores, connect }
 })

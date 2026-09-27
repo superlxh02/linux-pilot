@@ -99,6 +99,12 @@ pub enum ServiceSelector {
         kind: String,
         name: String,
     },
+    /// 单体主机上按进程 comm 稳定识别应用；PID 仍由运行时发现。
+    HostProcess {
+        #[serde(rename = "hostId")]
+        host_id: String,
+        comm: String,
+    },
     SystemdUnit {
         #[serde(rename = "hostId")]
         host_id: String,
@@ -239,6 +245,11 @@ impl TopologyManifest {
                 } if namespace.is_empty() || kind.is_empty() || name.is_empty() => {
                     return Err(format!("服务 {} 的工作负载选择器不完整", service.id));
                 }
+                ServiceSelector::HostProcess { host_id, comm }
+                    if !nodes.contains(host_id.as_str()) || comm.is_empty() || comm.len() > 15 =>
+                {
+                    return Err(format!("服务 {} 的主机进程选择器无效", service.id));
+                }
                 // v1alpha1 已保留 systemd 的 JSON 形状，但当前发现器只上报
                 // Kubernetes Pod。提前拒绝，避免导入后展示空白服务且误以为
                 // 它已被纳入评分；后续增加 unit 发现和独立资源仓储再开放。
@@ -246,6 +257,31 @@ impl TopologyManifest {
                     return Err(format!("服务 {} 的 systemd 归属暂未支持", service.id));
                 }
                 _ => {}
+            }
+            let cluster_type = self
+                .spec
+                .clusters
+                .iter()
+                .find(|cluster| cluster.id == service.cluster_id)
+                .map(|cluster| cluster.cluster_type.as_str());
+            if !matches!(
+                (&service.selector, cluster_type),
+                (
+                    ServiceSelector::KubernetesWorkload { .. },
+                    Some("kubernetes")
+                ) | (ServiceSelector::HostProcess { .. }, Some("standalone"))
+            ) {
+                return Err(format!("服务 {} 的选择器与集群类型不匹配", service.id));
+            }
+            if let ServiceSelector::HostProcess { host_id, .. } = &service.selector {
+                if !self
+                    .spec
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == *host_id && node.cluster_id == service.cluster_id)
+                {
+                    return Err(format!("服务 {} 的主机不属于当前集群", service.id));
+                }
             }
         }
         check_weights(

@@ -1,4 +1,4 @@
-# 命名空间内的最小发现权限；Worker DaemonSet 只发送其所在 kind 节点的内核数据。
+# 命名空间内的最小发现权限；Worker DaemonSet 为每个 kind Node 上报本节点内核数据。
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -75,12 +75,10 @@ spec:
       hostPID: true
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - { key: node-role.kubernetes.io/control-plane, operator: DoesNotExist }
+      # 本地实验要求包括 control-plane 在内的每个 Node 都运行一个 Worker。
+      # 生产环境可按安全策略限定节点；这里显式容忍 kind 的控制面污点。
+      tolerations:
+        - { operator: Exists }
       containers:
         - name: worker
           image: linux-pilot-worker:local

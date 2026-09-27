@@ -1,99 +1,61 @@
 <script setup lang="ts">
-/**
- * 集群页展示跨节点资源的实际归属，分别标明基础设施分与业务整体分。
- * 导入和导出共用版本化 JSON 契约，运维与将来的 AI 工具无需复制界面操作。
- */
+/** Kubernetes 集群入口：服务是第一视角，工作节点仅提供调度位置与容量信息。 */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Download, FileJson2, RefreshCw, Upload } from '@lucide/vue'
-import { request } from '../api'
+import { RouterLink, useRouter } from 'vue-router'
+import { Activity, ArrowRight, Bell, Boxes, RefreshCw, Server } from '@lucide/vue'
+import { request, type AlertEvent } from '../api'
 import { usePlatform } from '../store'
-
-interface PodView { uid: string; name: string; node_id: string; ready: boolean; resource_score: number | null; metrics: Record<string, number> }
-interface ServiceView { id: string; description: string; criticality: string; pod_count: number; covered_pods: number; resource_score: number | null; cpu_cores: number; memory_bytes: number; read_bytes_per_s: number; write_bytes_per_s: number; network_rx_bytes_per_s: number | null; network_tx_bytes_per_s: number | null; pods: PodView[] }
-interface NodeView { id: string; role: string; description: string; score: number | null; coverage: number; profile: string; scenario: string; capacity: { cpuCores: number; memoryBytes: number } }
-interface ClusterSnapshot { configured: boolean; revision?: number; time_ms?: number; infrastructure_score: number | null; overall_score: number | null; service_coverage?: number; nodes: NodeView[]; services: ServiceView[] }
+import type { ClusterSnapshot } from '../topology'
 
 const platform = usePlatform()
-const { role } = storeToRefs(platform)
-const canEdit = computed(() => role.value === 'operator' || role.value === 'admin')
+const router = useRouter()
+const { activeCluster, visibleHosts } = storeToRefs(platform)
 const snapshot = ref<ClusterSnapshot | null>(null)
-const manifest = ref<unknown>(null)
-const importText = ref('')
-const showImport = ref(false)
-const busy = ref(false)
-const message = ref('')
+const alerts = ref<AlertEvent[]>([])
 const error = ref('')
 let timer: number | undefined
+const cluster = computed(() => snapshot.value?.clusters.find((item) => item.id === activeCluster.value?.id))
+const services = computed(() => snapshot.value?.services.filter((item) => item.cluster_id === activeCluster.value?.id) || [])
+const nodes = computed(() => snapshot.value?.nodes.filter((item) => item.cluster_id === activeCluster.value?.id) || [])
+const activeAlerts = computed(() => alerts.value.filter((item) => !item.resolved_ms && nodes.value.some((node) => node.id === item.host_id)))
 
 async function refresh() {
   try {
-    const [next, config] = await Promise.all([
+    const [next, events] = await Promise.all([
       request<ClusterSnapshot>('/api/v1/topology/snapshot'),
-      request<unknown>('/api/v1/topology/manifest')
+      request<AlertEvent[]>('/api/v1/alert-events')
     ])
     snapshot.value = next
-    manifest.value = config
+    alerts.value = events
     error.value = ''
   } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
 }
-
-function exportManifest() {
-  if (!manifest.value) return
-  const blob = new Blob([JSON.stringify(manifest.value, null, 2) + '\n'], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = 'linux-pilot-topology.json'
-  link.click()
-  URL.revokeObjectURL(url)
-}
-
-async function loadFile(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]
-  if (file) importText.value = await file.text()
-}
-
-async function applyManifest() {
-  if (!canEdit.value) return
-  busy.value = true
-  error.value = ''
-  message.value = ''
-  try {
-    const parsed = JSON.parse(importText.value)
-    await request('/api/v1/topology/validate', { method: 'POST', body: JSON.stringify(parsed) })
-    await request('/api/v1/topology/manifest', { method: 'PUT', body: JSON.stringify(parsed) })
-    message.value = `配置版本 ${parsed.metadata.revision} 已应用`
-    showImport.value = false
-    await refresh()
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
-  finally { busy.value = false }
-}
-
-function bytes(value: number | null) {
-  if (value == null || !Number.isFinite(value)) return '—'
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GiB`
-  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`
-  if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`
-  return `${value.toFixed(0)} B`
-}
-function score(value: number | null) { return value == null ? '—' : value.toFixed(0) }
-function scenarioName(value: string) { return ({ general: '通用', cpu: 'CPU', application_io: '应用 I/O', storage: '存储', network: '网络' } as Record<string, string>)[value] || value }
-
+function score(value: number | null | undefined) { return value == null ? '—' : value.toFixed(0) }
+function bytes(value: number) { return value >= 1048576 ? `${(value / 1048576).toFixed(1)} MiB` : value >= 1024 ? `${(value / 1024).toFixed(1)} KiB` : `${value.toFixed(0)} B` }
+function openNode(id: string) { platform.setHost(id); void router.push('/node-overview') }
 onMounted(() => { void refresh(); timer = window.setInterval(refresh, 15_000) })
 onUnmounted(() => { if (timer) window.clearInterval(timer) })
 </script>
 
 <template>
-  <div class="page-stack cluster-page">
-    <div class="page-intro"><div><h2>集群与服务</h2><p>从节点、Pod 到逻辑服务查看资源归属。配置以版本化 JSON 导入，可由脚本复用。</p></div><div class="table-tools"><button class="button secondary" @click="refresh"><RefreshCw :size="15" /> 刷新</button><button v-if="manifest" class="button secondary" @click="exportManifest"><Download :size="15" /> 导出配置</button><button v-if="canEdit" class="button primary" @click="showImport = !showImport"><Upload :size="15" /> 导入配置</button></div></div>
-    <div v-if="error" class="notice error">{{ error }}</div><div v-if="message" class="notice cluster-success">{{ message }}</div>
-    <section v-if="showImport" class="panel"><div class="panel-header"><div><h3>导入 TopologyManifest</h3><p>先校验 schema，再按 revision 应用。已有版本必须递增 1。</p></div><FileJson2 :size="19" /></div><input type="file" accept="application/json,.json" @change="loadFile" /><textarea v-model="importText" class="cluster-json" spellcheck="false" placeholder="选择 JSON 文件，或粘贴 TopologyManifest" /><div class="cluster-actions"><button class="button primary" :disabled="busy || !importText" @click="applyManifest">{{ busy ? '校验中…' : '校验并应用' }}</button></div></section>
-    <div v-if="snapshot && !snapshot.configured" class="empty-panel">尚未导入拓扑配置。可从项目 virtual_env/manifest.json 开始。</div>
-    <template v-if="snapshot?.configured">
-      <div class="summary-grid three"><div class="summary-card"><span>服务基础设施分</span><strong>{{ score(snapshot.infrastructure_score) }}</strong><small>由已覆盖 Pod 的资源争用与健康状态汇总</small></div><div class="summary-card"><span>业务整体分</span><strong>待接入</strong><small>缺少端到端请求延迟、成功率等 SLI；不显示假分数</small></div><div class="summary-card"><span>服务覆盖率</span><strong>{{ Math.round((snapshot.service_coverage || 0) * 100) }}%</strong><small>配置版本 {{ snapshot.revision }} · {{ snapshot.services.length }} 个逻辑服务</small></div></div>
-      <section class="panel"><div class="panel-header"><div><h3>逻辑服务</h3><p>同一服务的 Pod 可以分布在不同节点；统计选取 Pod 父 cgroup，避免重复计算子容器。</p></div></div><div class="cluster-service-grid"><article v-for="service in snapshot.services" :key="service.id" class="cluster-service"><div class="cluster-service-head"><div><span class="cluster-eyebrow">{{ service.criticality === 'critical' ? '关键服务' : '服务' }}</span><h4>{{ service.id }}</h4><p>{{ service.description }}</p></div><div class="cluster-score">{{ score(service.resource_score) }}<small>资源分</small></div></div><div class="cluster-resource-row"><div><span>CPU 用量</span><strong>{{ service.cpu_cores.toFixed(2) }} 核</strong></div><div><span>内存</span><strong>{{ bytes(service.memory_bytes) }}</strong></div><div><span>磁盘读取</span><strong>{{ bytes(service.read_bytes_per_s) }}/s</strong></div><div><span>磁盘写入</span><strong>{{ bytes(service.write_bytes_per_s) }}/s</strong></div><div><span>Pod 网络接收</span><strong>{{ bytes(service.network_rx_bytes_per_s) }}{{ service.network_rx_bytes_per_s == null ? '' : '/s' }}</strong></div><div><span>Pod 网络发送</span><strong>{{ bytes(service.network_tx_bytes_per_s) }}{{ service.network_tx_bytes_per_s == null ? '' : '/s' }}</strong></div></div><div class="cluster-pods"><div class="cluster-pod" v-for="pod in service.pods" :key="pod.uid"><span class="status-dot" :class="{ offline: !pod.ready }"></span><span><strong>{{ pod.name }}</strong><small>{{ pod.node_id }}</small></span><b>{{ score(pod.resource_score) }}</b></div><div v-if="!service.pod_count" class="inline-empty">等待 Kubernetes 发现器上报 Pod</div></div><div class="cluster-coverage">已覆盖 {{ service.covered_pods }} / {{ service.pod_count }} 个 Pod · 暂无应用 SLI</div></article></div></section>
-      <section class="panel"><div class="panel-header"><div><h3>节点场景评分</h3><p>每个节点的评分场景与维度权重来自当前 JSON 配置。</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>节点</th><th>角色 / 描述</th><th>评分配置</th><th>申报容量</th><th class="align-right">分数</th><th class="align-right">覆盖率</th></tr></thead><tbody><tr v-for="node in snapshot.nodes" :key="node.id"><td class="mono"><strong>{{ node.id }}</strong></td><td>{{ node.role }}<small>{{ node.description }}</small></td><td>{{ scenarioName(node.scenario) }}<small class="mono">{{ node.profile }}</small></td><td>{{ node.capacity.cpuCores }} 核 · {{ bytes(node.capacity.memoryBytes) }}</td><td class="align-right number-cell">{{ score(node.score) }}</td><td class="align-right">{{ Math.round(node.coverage * 100) }}%</td></tr></tbody></table></div></section>
+  <div class="page-stack">
+    <div class="page-intro"><div><span class="cluster-eyebrow">KUBERNETES / {{ activeCluster?.id || '未配置' }}</span><h2>集群总览</h2><p>从微服务、Pod 副本和承载节点追踪性能；一个服务可跨节点，一个节点也可承载多个服务。</p></div><button class="button secondary" @click="refresh"><RefreshCw :size="15" /> 刷新</button></div>
+    <div v-if="error" class="notice error">{{ error }}</div>
+    <div v-if="!snapshot?.configured || !activeCluster" class="empty-panel">尚未配置 Kubernetes 集群。请打开“拓扑配置”导入或可视化编辑。</div>
+    <template v-else>
+      <div class="summary-grid three">
+        <div class="summary-card"><span>集群资源分</span><strong>{{ score(cluster?.resource_score) }}</strong><small>按已覆盖的服务 Pod 资源争用汇总；业务 SLI 尚未接入</small><Activity :size="21" /></div>
+        <div class="summary-card"><span>节点在线</span><strong>{{ cluster?.online_nodes ?? 0 }} / {{ cluster?.node_count ?? 0 }}</strong><small>每个 Node 各有一个 Worker DaemonSet Pod</small><Server :size="21" /></div>
+        <div class="summary-card"><span>未恢复告警</span><strong :class="activeAlerts.length ? 'text-danger' : 'text-success'">{{ activeAlerts.length }}</strong><small>当前 Kubernetes 集群内的节点告警</small><Bell :size="21" /></div>
+      </div>
+      <section class="panel"><div class="panel-header"><div><h3>微服务</h3><p>先看服务整体，再进入副本和资源明细。{{ services.length }} 个已配置服务。</p></div><RouterLink to="/services" class="text-link">全部服务 <ArrowRight :size="14" /></RouterLink></div>
+        <div class="service-summary-grid"><RouterLink v-for="service in services" :key="service.id" class="service-summary-card" :to="{ path: '/services', query: { service: service.id } }"><div class="service-summary-top"><span class="service-icon"><Boxes :size="18" /></span><span class="badge" :class="(service.covered_pods || 0) === (service.pod_count || 0) && service.pod_count ? 'badge-success' : 'badge-warning'">{{ service.covered_pods || 0 }} / {{ service.pod_count || 0 }} Pod 可评分</span></div><h4>{{ service.id }}</h4><p>{{ service.description }}</p><div class="service-summary-stats"><span>资源分 <b>{{ score(service.resource_score) }}</b></span><span>CPU <b>{{ service.cpu_cores.toFixed(2) }} 核</b></span><span>内存 <b>{{ bytes(service.memory_bytes) }}</b></span></div><div class="service-summary-foot">查看副本与趋势 <ArrowRight :size="14" /></div></RouterLink></div>
+      </section>
+      <section class="panel"><div class="panel-header"><div><h3>承载节点</h3><p>节点是 Kubernetes 调度单元，可能是物理机或虚拟机；此实验中的节点是 kind 容器。</p></div><RouterLink to="/nodes" class="text-link">查看节点指标 <ArrowRight :size="14" /></RouterLink></div>
+        <div class="node-strip"><button v-for="node in nodes" :key="node.id" class="node-strip-item" @click="openNode(node.id)"><span class="status-dot" :class="{ offline: !node.online }"></span><span><strong>{{ node.id }}</strong><small>{{ node.description }}</small></span><b>{{ score(node.score) }}</b></button></div>
+      </section>
+      <p class="scope-note">当前 {{ visibleHosts.length }} 个 Node 已进入拓扑。集群资源分用于定位资源争用；缺少端到端成功率、延迟和 SLO 时，业务整体分保持空值。</p>
     </template>
   </div>
 </template>

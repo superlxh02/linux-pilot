@@ -1,0 +1,58 @@
+name: linux-pilot-standalone
+
+# 三个容器是三台逻辑主机，各自一个单体应用和一个 Worker；Web 与数据库
+# 始终由根目录 compose.yaml 单独部署。这里不运行 Kubernetes。
+x-node: &node
+  image: linux-pilot-standalone:local
+  build:
+    context: .
+  privileged: true
+  restart: unless-stopped
+  environment: &node-env
+    PO_AGENT__SERVER_URL: http://host.docker.internal:50051
+    PO_AGENT__TOKEN: ${AGENT_TOKEN:?请先生成根目录 .env}
+    PO_AGENT__DETAIL_EVERY_SECS: "5"
+  extra_hosts:
+    - host.docker.internal:host-gateway
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=2)"]
+    interval: 10s
+    timeout: 3s
+    retries: 6
+
+services:
+  billing:
+    <<: *node
+    hostname: pilot-billing
+    environment:
+      <<: *node-env
+      PO_AGENT__HOST_ID: standalone-billing
+      PILOT_SERVICE_ROLE: billing
+    ports: ["127.0.0.1:18081:8080"]
+    volumes: ["billing-spool:/var/lib/linux-pilot-worker", "billing-data:/data"]
+  search:
+    <<: *node
+    hostname: pilot-search
+    environment:
+      <<: *node-env
+      PO_AGENT__HOST_ID: standalone-search
+      PILOT_SERVICE_ROLE: search
+    ports: ["127.0.0.1:18082:8080"]
+    volumes: ["search-spool:/var/lib/linux-pilot-worker", "search-data:/data"]
+  reports:
+    <<: *node
+    hostname: pilot-reports
+    environment:
+      <<: *node-env
+      PO_AGENT__HOST_ID: standalone-reports
+      PILOT_SERVICE_ROLE: reports
+    ports: ["127.0.0.1:18083:8080"]
+    volumes: ["reports-spool:/var/lib/linux-pilot-worker", "reports-data:/data"]
+
+volumes:
+  billing-spool:
+  search-spool:
+  reports-spool:
+  billing-data:
+  search-data:
+  reports-data:

@@ -53,8 +53,10 @@ export const metricInfo: Record<string, MetricInfo> = {
   'proc.user_processes': { title: '用户态进程数', unit: '个', meaning: '命令行非空的用户态进程数量，不包含内核线程。' },
   'proc.inventory_omitted': { title: '清单截断进程数', unit: '个', meaning: '超过当前进程清单 1024 项上限的用户态进程数量。' },
   'proc.threads': { title: '进程线程数', unit: '个', meaning: '进程当前线程数量。' },
-  'proc.voluntary_ctxt_per_s': { title: '主动上下文切换', unit: '次/秒', meaning: '进程主动让出 CPU 的速率。' },
-  'proc.involuntary_ctxt_per_s': { title: '被动上下文切换', unit: '次/秒', meaning: '进程被抢占或调度切换的速率。' },
+  'proc.voluntary_ctxt_per_s': { title: '主线程主动切换', unit: '次/秒', meaning: '进程组长线程主动让出 CPU 的速率；其他线程请看每 TID 明细。' },
+  'proc.involuntary_ctxt_per_s': { title: '主线程被动切换', unit: '次/秒', meaning: '进程组长线程被抢占的速率；不能当成整个线程组总量。' },
+  'proc.voluntary_ctxt_total': { title: '主线程累计主动切换', unit: '次', meaning: '进程组长线程创建以来主动让出 CPU 的累计次数。' },
+  'proc.involuntary_ctxt_total': { title: '主线程累计被动切换', unit: '次', meaning: '进程组长线程创建以来被调度器抢占的累计次数。' },
   'proc.rss_bytes': { title: '进程驻留内存', unit: 'B', meaning: '进程占用的物理页大小。' },
   'proc.read_bytes_per_s': { title: '进程磁盘读取', unit: 'B/s', meaning: '归因到进程的实际存储读取速率。' },
   'proc.write_bytes_per_s': { title: '进程磁盘写入', unit: 'B/s', meaning: '归因到进程的实际存储写入速率。' },
@@ -70,11 +72,20 @@ export const metricInfo: Record<string, MetricInfo> = {
   'proc.swap_bytes': { title: '进程交换页', unit: 'B', meaning: '进程页表中已换出的匿名内存。' },
   'proc.open_fds': { title: '打开的文件描述符', unit: '个', meaning: '该进程当前可见的文件描述符数量。' },
   'proc.stack_virtual_bytes': { title: '虚拟栈空间', unit: 'B', meaning: '内核报告的栈虚拟地址空间，不等于实际使用的栈字节。' },
+  'proc.main_stack_rss_bytes': { title: '主线程栈驻留量', unit: 'B', meaning: '主线程 [stack] 映射的驻留物理页；不包含其他线程栈，也不代表实时栈深。' },
   'thread.cpu_runtime_ms_per_s': { title: '线程 CPU 时间', unit: 'ms/秒', meaning: 'schedstat 的线程运行时间增长率。' },
   'thread.runqueue_wait_ms_per_s': { title: '线程运行队列等待', unit: 'ms/秒', meaning: '线程可运行但尚未获得 CPU 的等待时间增长率，不是切换本身的开销。' },
   'thread.voluntary_ctxt_per_s': { title: '线程主动切换', unit: '次/秒', meaning: '该线程每秒自愿让出 CPU 的次数。' },
   'thread.involuntary_ctxt_per_s': { title: '线程被动切换', unit: '次/秒', meaning: '该线程每秒被抢占的次数。' },
   'thread.slices_per_s': { title: '线程时间片', unit: '次/秒', meaning: 'schedstat 报告的运行时间片增长率。' },
+  'thread.voluntary_ctxt_total': { title: '线程累计主动切换', unit: '次', meaning: '线程创建以来主动让出 CPU 的累计次数。' },
+  'thread.involuntary_ctxt_total': { title: '线程累计被动切换', unit: '次', meaning: '线程创建以来被抢占的累计次数。' },
+  'thread.context_switches_total': { title: '线程累计切换', unit: '次', meaning: '主动与被动上下文切换累计次数之和。' },
+  'thread.context_switches_per_s': { title: '线程切换速率', unit: '次/秒', meaning: '采样窗口内主动与被动切换次数之和除以窗口时长。' },
+  'thread.cpu_runtime_total_ms': { title: '线程累计运行', unit: 'ms', meaning: 'schedstat 报告的线程累计 CPU 运行时间。' },
+  'thread.runqueue_wait_total_ms': { title: '线程累计排队等待', unit: 'ms', meaning: '线程处于可运行态但等待 CPU 的累计时间，不是切换操作本身耗时。' },
+  'thread.slices_total': { title: '线程累计时间片', unit: '次', meaning: 'schedstat 报告的累计调度时间片数。' },
+  'thread.runqueue_wait_per_slice_ms': { title: '每时间片平均排队等待', unit: 'ms', meaning: '采样窗口运行队列等待增量除以时间片增量；不是一次上下文切换的执行开销。' },
   'pod.net_rx_bytes_per_s': { title: 'Pod 网络接收', unit: 'B/s', meaning: 'Pod 网络命名空间非 loopback 接口的接收字节；多个容器共享。' },
   'pod.net_tx_bytes_per_s': { title: 'Pod 网络发送', unit: 'B/s', meaning: 'Pod 网络命名空间非 loopback 接口的发送字节；不能直接归因到单个进程。' },
   'cgroup.cpu_usage_pct': { title: '工作负载 CPU', unit: '% 单核', meaning: 'cgroup CPU 消耗，可超过 100%。' },
@@ -137,8 +148,8 @@ Object.assign(metricInfo, {
   'proc.major_faults_per_s': info('进程重大缺页', '次/秒', '进程每秒发生的需外部读取的缺页次数。'),
   'proc.read_syscalls_per_s': info('进程读取调用', '次/秒', '进程每秒执行的读取类系统调用次数。'),
   'proc.write_syscalls_per_s': info('进程写入调用', '次/秒', '进程每秒执行的写入类系统调用次数。'),
-  'proc.voluntary_ctxt_per_s': info('主动上下文切换', '次/秒', '进程自愿让出 CPU 的切换速率，常见于等待。'),
-  'proc.involuntary_ctxt_per_s': info('被动上下文切换', '次/秒', '进程被调度器抢占的切换速率。'),
+  'proc.voluntary_ctxt_per_s': info('主线程主动切换', '次/秒', '进程组长线程主动让出 CPU 的切换速率；每个 TID 的数据见线程表。'),
+  'proc.involuntary_ctxt_per_s': info('主线程被动切换', '次/秒', '进程组长线程被抢占的切换速率；不是整个线程组总量。'),
   'cgroup.cpu_throttled_per_s': info('CPU 限流事件', '次/秒', 'cgroup 每秒遭遇 CPU 配额限流的周期数。'),
   'cgroup.cpu_throttled_time_ms_per_s': info('CPU 限流时长', 'ms/秒', 'cgroup 因 CPU 配额耗尽而等待的时间增长率。'),
   'cgroup.io_read_bytes_per_s': info('工作负载读取吞吐', 'B/s', 'cgroup 归因到块设备的读取字节速率。'),
@@ -160,12 +171,19 @@ Object.assign(metricInfo, {
 /** PSI 指标有资源、some/full 和窗口维度，按键名生成一致的中文口径。 */
 export function metricDetails(name: string): MetricInfo | undefined {
   if (metricInfo[name]) return metricInfo[name]
-  const match = name.match(/^(cpu|mem|io|cgroup\.cpu|cgroup\.memory|cgroup\.io)\.psi\.(some|full)\.(avg10|avg60|avg300|total_us)$/)
-  if (!match) return undefined
-  const resource = ({ cpu: 'CPU', mem: '内存', io: 'I/O', 'cgroup.cpu': '工作负载 CPU', 'cgroup.memory': '工作负载内存', 'cgroup.io': '工作负载 I/O' } as Record<string, string>)[match[1]]
-  const scope = match[2] === 'some' ? '至少一个任务等待' : '所有非空闲任务同时等待'
-  const window = match[3] === 'total_us' ? '累计阻塞时间' : `最近 ${match[3].slice(3)} 秒压力均值`
-  return info(`${resource} PSI ${match[2]}`, match[3] === 'total_us' ? 'μs' : '%', `${scope}${resource}；${window}。`)
+  // 主机指标采用 cpu.psi.* / mem.psi.*，cgroup v2 则采用
+  // cgroup.psi.cpu.* / cgroup.psi.memory.*。两者的资源名称顺序不同，
+  // 不可用同一个“资源.psi”表达式，否则 Pod 压力图会漏掉中文图例。
+  const host = name.match(/^(cpu|mem|io)\.psi\.(some|full)\.(avg10|avg60|avg300|total_us)$/)
+  const group = name.match(/^cgroup\.psi\.(cpu|memory|io)\.(some|full)\.(avg10|avg60|avg300|total_us)$/)
+  if (!host && !group) return undefined
+  const resourceKey = host?.[1] || group?.[1]
+  const resource = ({ cpu: 'CPU', mem: '内存', memory: '内存', io: 'I/O' } as Record<string, string>)[resourceKey || '']
+  const scopeKey = host?.[2] || group?.[2]
+  const windowKey = host?.[3] || group?.[3] || ''
+  const scope = scopeKey === 'some' ? '部分任务' : '全部任务'
+  const window = windowKey === 'total_us' ? '累计阻塞时间' : `最近 ${windowKey.slice(3)} 秒压力均值`
+  return info(`${group ? '工作负载' : ''}${resource}${scope}压力`, windowKey === 'total_us' ? 'μs' : '%', `${scope}等待${resource}资源；${window}。`)
 }
 
 export function formatValue(name: string, value: number | null | undefined, digits = 1): string {

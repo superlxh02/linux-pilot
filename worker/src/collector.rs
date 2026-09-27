@@ -8,7 +8,7 @@ use linux_pilot_model::Metric;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::Path,
 };
 use tracing::warn;
@@ -1076,14 +1076,14 @@ impl Collector {
         let online_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as f64;
         let host_memory = read_kv("/proc/meminfo", ':', 1024).get("MemTotal").copied();
         let mut selected = HashSet::new();
-        for (pid, start, user_ticks, system_ticks, major_faults, block_delay) in candidates
+        for (rank, (pid, start, user_ticks, system_ticks, major_faults, block_delay)) in candidates
             .into_iter()
             .enumerate()
             .filter_map(|(rank, item)| {
                 if (rank < 20 || wanted.contains(&(item.0, item.1)))
                     && selected.insert((item.0, item.1))
                 {
-                    Some(item)
+                    Some((rank, item))
                 } else {
                     None
                 }
@@ -1136,6 +1136,17 @@ impl Collector {
                 }
             }
             let status = read_kv(format!("/proc/{pid}/status"), ':', 1);
+            // /proc/<tgid>/status 的切换计数属于线程组长 task_struct，
+            // 不是整个多线程进程的累计值。协议保留 proc.* 兼容字段，
+            // 前端明确标为“主线程”；逐 TID 的完整明细见 thread.*。
+            for (key, name) in [
+                ("voluntary_ctxt_switches", "proc.voluntary_ctxt_total"),
+                ("nonvoluntary_ctxt_switches", "proc.involuntary_ctxt_total"),
+            ] {
+                if let Some(&value) = status.get(key) {
+                    Self::emit(out, name, value as f64, now, "proc", labels.clone());
+                }
+            }
             for (key, metric, scale) in [
                 ("VmRSS", "proc.rss_bytes", 1024.0),
                 ("VmSize", "proc.vmsize_bytes", 1024.0),
@@ -1209,7 +1220,22 @@ impl Collector {
                         labels.clone(),
                     );
                 }
+            }
+            // 热点前五名可直接查看线程调度与主线程栈驻留量；固定监控
+            // 扩展到任意目标。每个进程最多扫描 128 个线程和 8 MiB smaps，
+            // 避免将所有用户进程的高成本明细都写入中心端。
+            if rank < 5 || wanted.contains(&(pid, start)) {
                 self.thread_details(pid, start, now, elapsed, out);
+                if let Some(bytes) = main_stack_rss_bytes(pid) {
+                    Self::emit(
+                        out,
+                        "proc.main_stack_rss_bytes",
+                        bytes as f64,
+                        now,
+                        "smaps",
+                        labels.clone(),
+                    );
+                }
             }
             let io = read_kv(format!("/proc/{pid}/io"), ':', 1);
             let mut snapshot = io.clone();
@@ -1267,7 +1293,7 @@ impl Collector {
             .retain(|(pid, tid), _| Path::new(&format!("/proc/{pid}/task/{tid}")).exists());
     }
 
-    /// 固定监控进程的每线程调度计数。
+    /// 热点进程或固定监控进程的每线程调度计数。
     ///
     /// schedstat 的第二列是运行队列等待时间，不是上下文切换指令开销；
     /// 第三列是运行时间片次数。跨线程相加前必须用相同采样窗口。
@@ -1326,6 +1352,27 @@ impl Collector {
                 ("start_ticks".to_owned(), process_start.to_string()),
                 ("tid".to_owned(), tid.to_string()),
             ]);
+            // status 和 schedstat 是自线程创建后的累计计数。展示累计
+            // 次数/时间时不做差分；即使 Worker 重启也能继续读到真实值。
+            for (name, value) in [
+                ("thread.voluntary_ctxt_total", current[0] as f64),
+                ("thread.involuntary_ctxt_total", current[1] as f64),
+                (
+                    "thread.context_switches_total",
+                    current[0].saturating_add(current[1]) as f64,
+                ),
+                (
+                    "thread.cpu_runtime_total_ms",
+                    current[2] as f64 / 1_000_000.0,
+                ),
+                (
+                    "thread.runqueue_wait_total_ms",
+                    current[3] as f64 / 1_000_000.0,
+                ),
+                ("thread.slices_total", current[4] as f64),
+            ] {
+                Self::emit(out, name, value, now, "proc", labels.clone());
+            }
             if let (Some(seconds), Some((old_process, old_thread, before))) = (
                 elapsed,
                 self.thread_previous
@@ -1343,6 +1390,31 @@ impl Collector {
                             out,
                             name,
                             current[index].saturating_sub(before[index]) as f64 * scale / seconds,
+                            now,
+                            "proc",
+                            labels.clone(),
+                        );
+                    }
+                    let switches = current[0]
+                        .saturating_sub(before[0])
+                        .saturating_add(current[1].saturating_sub(before[1]));
+                    Self::emit(
+                        out,
+                        "thread.context_switches_per_s",
+                        switches as f64 / seconds,
+                        now,
+                        "proc",
+                        labels.clone(),
+                    );
+                    let slices = current[4].saturating_sub(before[4]);
+                    if slices > 0 {
+                        // 这是可运行态排队等待/调度时间片，不是内核执行
+                        // context switch 指令所耗的 CPU 时间。
+                        let wait_ns = current[3].saturating_sub(before[3]);
+                        Self::emit(
+                            out,
+                            "thread.runqueue_wait_per_slice_ms",
+                            wait_ns as f64 / slices as f64 / 1_000_000.0,
                             now,
                             "proc",
                             labels.clone(),
@@ -1746,6 +1818,64 @@ fn process_argv0(pid: i32) -> String {
         command.pop();
     }
     command
+}
+
+/// 返回主线程 `[stack]` 映射已驻留的页数（字节）。
+///
+/// `VmStk` 仅是虚拟地址范围，不能回答占用了多少物理页；smaps 的
+/// `Rss` 可以回答这个更窄的问题。Linux 4.5 起不再为每个 pthread
+/// 标记 `[stack:tid]`，因此这里刻意只声明“主线程栈驻留量”，不把它
+/// 误写成整个进程所有线程的栈总量或真实栈深。
+fn main_stack_rss_bytes(pid: i32) -> Option<u64> {
+    let file = fs::File::open(format!("/proc/{pid}/smaps")).ok()?;
+    parse_main_stack_rss(BufReader::new(file))
+}
+
+fn parse_main_stack_rss(reader: impl BufRead) -> Option<u64> {
+    let mut in_main_stack = false;
+    let mut scanned = 0_usize;
+    for line in reader.lines() {
+        let line = line.ok()?;
+        scanned = scanned.saturating_add(line.len() + 1);
+        if scanned > 8 * 1024 * 1024 {
+            return None;
+        }
+        // VMA 头首列是十六进制地址范围；字段行如 `Rss:` 不满足此形状。
+        let first = line.split_whitespace().next().unwrap_or("");
+        let is_header = first.split_once('-').is_some_and(|(start, end)| {
+            !start.is_empty()
+                && !end.is_empty()
+                && start.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && end.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+        if is_header {
+            in_main_stack = line.trim_end().ends_with("[stack]");
+        } else if in_main_stack && line.starts_with("Rss:") {
+            return line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|kib| kib.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::parse_main_stack_rss;
+
+    #[test]
+    fn counts_only_main_stack_resident_pages() {
+        let smaps = b"1000-2000 rw-p 00000000 00:00 0 [heap]\nRss: 4096 kB\n2000-3000 rw-p 00000000 00:00 0 [stack]\nSize: 128 kB\nRss: 32 kB\n3000-4000 rw-p 00000000 00:00 0\nRss: 8192 kB\n";
+        assert_eq!(parse_main_stack_rss(&smaps[..]), Some(32 * 1024));
+    }
+
+    #[test]
+    fn missing_stack_is_not_reported_as_zero() {
+        let smaps = b"1000-2000 rw-p 00000000 00:00 0 [heap]\nRss: 64 kB\n";
+        assert_eq!(parse_main_stack_rss(&smaps[..]), None);
+    }
 }
 
 /// 读取 proc/cgroup 的简单键值文件；字段缺失时自然降级。

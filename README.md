@@ -1,54 +1,45 @@
-<p align="center"><img src="web/site/assets/logo.svg" width="76" height="76" alt="Linux-Pilot 图标"></p>
+<p align="center"><img src="web/site/assets/logo.svg" width="76" height="76" alt="Linux-Pilot 标志"></p>
 
 <h1 align="center">Linux-Pilot</h1>
 
-<p align="center">开源 Linux 性能观测平台 · Rust Worker + Rust Web 后端 + Vue 3 控制台</p>
+<p align="center">从 Linux 内核到微服务：在一个工作台中看清资源消耗、调度等待与性能热点。</p>
 
-<p align="center"><a href="web/docs/architecture.md">架构说明</a> · <a href="web/docs/metrics.md">指标字典</a> · <a href="web/docs/admin.md">管理员说明</a> · <a href="web/docs/email.md">真实邮箱配置</a> · <a href="CONTRIBUTING.md">参与贡献</a></p>
+<p align="center"><a href="#功能">功能</a> · <a href="#特点">特点</a> · <a href="#快速使用">快速使用</a> · <a href="#架构设计">架构设计</a> · <a href="#仿真环境">仿真环境</a> · <a href="#共享与贡献">共享与贡献</a></p>
 
-Linux-Pilot 在目标 Linux 主机上持续采集性能指标和内核信号，将数据可靠地送往中心服务，并在浅色 Web 工作台中提供实时总览、分类查询、按需 perf 剖析、告警与可解释的场景评分。
+Linux-Pilot 是开源 Linux 性能观测平台。Rust Worker 部署在 Linux 主机或 Kubernetes Node，中心端用 Rust 处理实时指标、告警与场景评分，Vue 3 工作台分别提供**普通主机集群**和 **Kubernetes 微服务集群**视图。项目目前适合自建观测、研发排障和实验环境验证。
 
-> **项目状态：早期版本。** 单实例中心端和分布式 Worker 已可运行；规则评分不等于基准测试，AI 分析和多租户尚未实现。上线前请完成容量、备份和安全配置评估。
+<p align="center"><img src="web/docs/images/kubernetes-overview.png" width="920" alt="Kubernetes 集群总览"></p>
 
 ## 功能
 
-| 方向 | 当前能力 |
+| 视角 | 可以做什么 |
 | --- | --- |
-| 主机采集 | CPU、内存、PSI、块设备、文件系统、网络、进程 Top N、cgroup v2；主机汇总默认每秒采样 |
-| 内核与剖析 | Aya eBPF 的 TCP、块 I/O 与调度信号；按需 perf CPU 调用栈和火焰图 |
-| 可靠传输 | Worker 主动建立 gRPC/HTTP2 双向流；本地磁盘缓冲、ACK、断线回放和批次去重 |
-| 观测控制台 | 节点总览、按挂载点与 cgroup 画图、用户态进程清单、固定监控服务进程、五场景评分、告警和性能剖析；WebSocket 实时更新 |
-| 双模式实验环境 | `virtual_env/standalone/` 三个单体主机容器与各自 Worker；`virtual_env/` kind 三 Node Kubernetes 与每 Node 一个 Worker；可在浅色 UI 中切换 |
-| 账号 | 邮箱验证码注册、Argon2id 密码、HttpOnly 会话；管理员用户管理、角色分配和操作记录 |
+| 集群 | 查看资源评分、在线节点、告警、服务覆盖率；按 CPU、I/O、存储等场景使用不同评分权重。 |
+| Kubernetes 微服务 | 按 Deployment 查看跨 Node 副本的 CPU、内存、存储 I/O 与 Pod 网络；下钻 Pod 的历史曲线、CPU 限流和资源压力。 |
+| 普通主机 | 查看 CPU、内存、网络、磁盘、文件系统、TCP 和 cgroup；通过用户进程清单定位热点并固定监控进程实例。 |
+| 进程与线程 | 进程 CPU、内存、磁盘与部分 Socket 流量归因；累计及每秒速率的上下文切换、线程运行与排队等待、主线程栈驻留量。 |
+| 内核分析 | eBPF 采集 TCP、块 I/O、调度事件；按需启动 perf CPU 栈采样与火焰图。 |
+| 管理 | 邮箱验证码注册、角色与用户管理、操作记录、告警、可视化拓扑配置和 JSON 导入导出。 |
 
-指标的单位、来源、含义及诊断用途见 [完整指标字典](web/docs/metrics.md)。该字典也标出了尚未实现的候选指标；页面会对缺失数据标明缺失，不会显示假零值。
+<p align="center"><img src="web/docs/images/kubernetes-services.jpg" width="920" alt="微服务与 Pod 性能曲线"></p>
 
-## 项目结构
+<p align="center"><img src="web/docs/images/process-details.jpg" width="920" alt="普通主机的进程资源与主线程栈占用"></p>
 
-```text
-worker/                    独立 Cargo 工作区、采集端镜像和 manage.sh
-  contracts/               Worker 自用的模型与 Protobuf 契约
-  ebpf/                    eBPF 源码与当前编译对象
-web/                       独立 Cargo 工作区
-  backend/                 Axum + SeaORM，按 DDD 分层
-    domain/                纯规则评分器
-    src/application/       用例与仓储/邮件/OAuth 端口
-    src/infrastructure/    PostgreSQL、SMTP、OAuth 适配器
-    src/interfaces/        HTTP、WebSocket、gRPC 适配器
-    appliaction.yaml       层级配置文件（沿用项目指定拼写）
-  contracts/               Web 自用的模型与 Protobuf 契约
-  frontend/                Vue 3 控制台
-  site/                    项目官网静态页面
-  docs/                    指标与认证文档
-compose.yaml               只包含 Web 前端、Web 后端和 PostgreSQL
-virtual_env/               普通主机与 kind Kubernetes 双模式模拟、真实服务和负载脚本
-```
+<p align="center"><img src="web/docs/images/process-threads.jpg" width="920" alt="服务进程的磁盘与上下文切换曲线，以及线程累计切换和调度等待统计"></p>
 
-Worker 与 Web **没有根目录 Cargo 工作区**，可分别拷贝、构建和部署。为保证独立性，版本化契约在两边各保留一份；修改协议后运行 `bash web/scripts/check-contracts.sh` 检查副本一致。Protobuf 的 `po.agent.v1` 命名空间为兼容现有 v1 数据流保留，产品名称已改为 Linux-Pilot。
+每个指标的单位、意义、数据来源和采集限制见[指标字典](web/docs/metrics.md)。资源分用于发现争用，**不等于业务 SLO 或性能基准分**；没有端到端成功率与延迟时，业务整体分保持空值。
 
-## 快速开始
+## 特点
 
-需要 Docker Engine/Compose v2 和 OpenSSL（用于首次生成随机口令）。Web 默认 Compose 只有前端、后端和 PostgreSQL；本地验证邮箱注册时叠加 Mailpit：
+- **两个独立的 Rust 项目**：`worker/` 与 `web/` 分别维护 Cargo 工作区、锁文件和部署入口；根目录没有 `Cargo.toml`。
+- **低延迟与可靠传输**：Worker 主动建立 gRPC/HTTP2 双向流，批次先落本地磁盘，再发送、确认和断线回放；中心端按批次身份去重。
+- **准确的归属边界**：普通主机进程用 `PID + 启动 tick` 区分实例；Kubernetes 用 Deployment、Pod UID 和 Pod 父 cgroup 聚合资源，一个服务可跨多个 Node。
+- **可解释的规则评分**：五维场景权重由纯领域服务实现，缺测不填零；拓扑和评分配置可通过版本化 JSON 导入、导出，便于后续自动化分析。
+- **按需控制开销**：基础指标每秒采样，设备与工作负载明细默认每 5 秒采样；CPU Top 20 有进程时序，前 5 名和固定监控目标有线程明细。
+
+## 快速使用
+
+需要 Docker Engine 与 Compose v2。以下命令启动 **Web 前端、Rust 后端和 PostgreSQL**；本地邮箱测试额外启动 Mailpit。
 
 ```bash
 ./web/scripts/init-env.sh
@@ -56,78 +47,41 @@ docker compose -f compose.yaml -f web/compose.dev.yaml up -d --build
 curl http://localhost:3000/health/ready
 ```
 
-打开 [Web 控制台](http://localhost:3000)。内置管理员用户名为 **`admin`**，固定初始密码及正式部署的覆盖方法见 [管理员文档](web/docs/admin.md)。普通用户可使用邮箱验证码注册，本地验证码在 [Mailpit 收件箱](http://localhost:8025) 查看。要向真实邮箱发送验证码，请按 [SMTP 配置指南](web/docs/email.md)填写邮箱服务参数，并只运行 `docker compose up -d --build`，不使用 Mailpit 叠加文件。
+访问 [http://localhost:3000](http://localhost:3000)。内置管理员用户名为 `admin`，固定初始密码和覆盖方法见[管理员说明](web/docs/admin.md)。普通用户可用邮箱验证码注册；本地验证码在 [Mailpit](http://localhost:8025) 查看。[真实 SMTP 配置](web/docs/email.md)完成后，只运行 `docker compose up -d --build` 即可发往真实邮箱。
 
-在需要观测的 **Linux 主机**上单独部署 Worker：
+在需要观测的 **Linux 主机**上单独安装 Worker：
 
 ```bash
 cd worker
 cp .env.example .env
-# 修改 .env 中的 PO_AGENT__SERVER_URL 和 PO_AGENT__TOKEN
+# 配置 PO_AGENT__SERVER_URL、PO_AGENT__TOKEN
 ./manage.sh start
 ./manage.sh status
-./manage.sh logs
 ```
 
-`./manage.sh build|start|stop|restart|status|logs` 管理独立 Worker 容器。`stop` 会移除容器，但保留存放未确认批次的 Docker 卷。Worker 需要 `privileged`、宿主机 PID/网络命名空间和 `/sys` 读取权限；部署前应评估目标主机的安全策略。macOS 上 Docker 采集到的是 Docker Linux VM，**不会**采集 macOS 宿主机数据。
+Worker 主动连接后端 `50051` 端口；`PO_AGENT__TOKEN` 与 Web `.env` 的 `AGENT_TOKEN` 一致。`./manage.sh build|start|stop|restart|status|logs` 管理独立容器。Worker 的 eBPF 和 perf 需要目标 Linux 内核、相应权限与能力；在 macOS Docker Desktop 运行时观测对象是 Docker Linux VM。[部署架构与生产边界](web/docs/architecture.md)说明 TLS、数据保留和扩容限制。
 
-### 验证 perf 火焰图
+## 架构设计
 
-在运行 Worker 的 Docker Engine 上创建一个短时 CPU 负载，再把该进程的 **Docker 主机 PID** 填到控制台的「性能剖析」页面。页面也会列出所选节点近期的 CPU 热点进程供选择。若使用 Docker Desktop，以下 PID 属于其 Linux VM，macOS 活动监视器中的 PID 不能用于 Worker 采样。
+<p align="center"><img src="web/docs/architecture.svg" width="1000" alt="Linux-Pilot 数据与部署架构图"></p>
 
-```bash
-docker run -d --rm --name linux-pilot-cpu-demo --entrypoint sh linux-pilot-worker:local -c 'while :; do :; done'
-docker inspect -f '{{.State.Pid}}' linux-pilot-cpu-demo
-# 在控制台选运行该容器的 Worker 节点，填入上述 PID，采样 10～15 秒、49 Hz
-docker rm -f linux-pilot-cpu-demo
-```
+`worker/` 负责 `/proc`、cgroup、eBPF 与 perf；`web/backend/` 按 DDD 分为领域、应用、基础设施和接口层，采用 Axum、SeaORM、`config` 和 `tracing`；`web/frontend/` 为 Vue 3 工作台。后端从 `web/backend/appliaction.yaml` 读取层级配置，环境变量可覆盖配置项。名称保留项目约定的 `appliaction.yaml` 拼写。
 
-请在采样任务结束后再移除演示容器。`perf record` 成功但样本数为零通常表示进程在窗口内没有消耗 CPU，或进程已退出；采到事件却没有栈时，应检查目标程序的符号及帧指针。节点显示「perf 已安装」只代表命令可执行，内核权限与实际采样仍以任务结果为准。
+Worker 和 Web 各有一份版本化数据契约，以便独立构建与滚动部署。修改协议后运行 `bash web/scripts/check-contracts.sh`。详细的 [DDD 分层、ACK/去重链路与评分边界](web/docs/architecture.md)在架构文档中说明。
 
-### 监控服务进程
+## 仿真环境
 
-在控制台「进程监控」选择节点，按 PID、UID 或可执行文件搜索用户态进程，点击「查看」后可由操作员或管理员「固定监控」。页面展示 CPU、驻留内存、磁盘读写、线程和上下文切换时序；文件系统与 cgroup 曲线则在「指标探索」中选择挂载点或工作负载查看。进程清单每 15 秒更新，最多展示 CPU 活动最高的 1024 项；超过上限时页面会提示截断数量。详细进程数据默认只保留 CPU Top 20 和单节点最多 20 个固定监控对象，以控制数据库写入量。
+`virtual_env/` 提供两套可同时运行的实验环境，均使用真实 Linux 服务和 Worker，不向图表注入假数据。
 
-固定监控绑定 **PID + 进程启动 tick**。服务重启或 PID 被复用后，旧对象会标记为已退出，不会把新进程误并入旧曲线；需要选择新进程继续监控。清单不采集命令行参数，避免把启动参数中的凭据传到中心端。Docker Desktop 上只列出 Linux VM 中的进程，不能直接监控 macOS 进程。
+| 模式 | 组成 | 启动与制造负载 |
+| --- | --- | --- |
+| 普通主机集群 | 三个独立 Docker 容器；每个容器一个单体服务与一个 Worker。 | `./virtual_env/standalone/manage.sh up`，然后 `./virtual_env/standalone/manage.sh load --duration 60 --rate 6 --mode mixed` |
+| Kubernetes 集群 | kind 的三个 Node；每个 Node 一个 Worker DaemonSet Pod，运行跨节点订单服务与库存服务。 | `./virtual_env/manage.sh up`，然后 `./virtual_env/manage.sh load --duration 60 --rate 4 --mode mixed` |
 
-目标主机可不开放入站端口；Worker 主动连接中心服务 `50051`。跨机器部署时，把 `PO_AGENT__SERVER_URL` 改成中心端实际可达地址，`PO_AGENT__TOKEN` 必须与 Web `.env` 中的 `AGENT_TOKEN` 相同。公网或非可信网络应为 gRPC 配置 TLS。若采用原生 systemd 安装，可参考 [Worker 服务文件](worker/linux-pilot-worker.service)。
+在工作台左侧切换模式；「拓扑配置」支持编辑节点容量、用途、评分场景和服务归属，并导入/导出 [`linux-pilot.io/v1alpha1` JSON](virtual_env/manifest.json)。两套实验都运行在同一个 Docker Linux VM 上，适合验证归属和功能链路，不能当作独立物理机性能基准。安装条件、业务接口、停止命令与故障排查见[仿真环境指南](virtual_env/README.md)。
 
-生产环境可叠加 [gRPC TLS 配置示例](web/compose.prod.example.yaml)：设置 `PO_MODE=production`、`PO_PUBLIC_URL=https://实际控制台域名`、真实 SMTP 与 `GRPC_TLS_DIR` 后运行 `docker compose -f compose.yaml -f web/compose.prod.example.yaml up -d --build`。还需由部署环境的 HTTPS 反向代理保护 Web 入口。Worker 若使用自建 CA，设置 `PO_AGENT__CA_CERT_PATH=/etc/linux-pilot/ca.pem`，并在运行 `manage.sh` 时设置 `PILOT_WORKER_CA_DIR=/宿主机/证书目录`。
+## 共享与贡献
 
-## 开发
+欢迎通过 [GitHub Issues](https://github.com/superlxh02/linux-pilot/issues) 报告问题、分享复现脚本或提出改进；提交代码前请阅读[贡献指南](CONTRIBUTING.md)。复现问题时可附上经过脱敏的拓扑 JSON、指标名、内核版本及 Worker 日志，不要提交 `.env` 或访问令牌。项目采用 [MIT License](LICENSE)。
 
-### 本地双模式实验环境
-
-macOS + Docker Desktop/OrbStack 上可同时运行三台单体主机的 Docker 模拟和 1 控制面 + 2 工作 Node 的 kind 集群。前者每个容器有一个服务和一个 Worker；后者每个 Node 包括控制面都有一个 Worker。完整部署、数据边界和负载接口见 [实验环境说明](virtual_env/README.md)。
-
-```bash
-./virtual_env/standalone/manage.sh up
-./virtual_env/standalone/manage.sh load --duration 60 --rate 6 --mode mixed
-./virtual_env/manage.sh up
-./virtual_env/manage.sh load --duration 60 --rate 4 --mode mixed
-```
-
-在 Web 左侧切换「普通主机」与「Kubernetes」。前者提供节点、进程与单体服务视图；后者提供集群、微服务、Pod 副本与 Node 视图。「拓扑配置」可视化编辑节点描述、容量、评分场景和服务归属，并可导入/导出 [JSON 配置](virtual_env/manifest.json)。两套模拟都共享 Mac 的 Docker Linux VM，不用于独立物理机性能基准测试。
-
-Rust 1.98 或更高版本、Node.js 24 可用于本地开发。两端各自运行测试：
-
-```bash
-cd web && cargo fmt --all --check && cargo test --locked --workspace
-cd ../worker && cargo fmt --all --check && cargo test --locked --workspace
-cd ../web/frontend && npm ci && npm run build
-bash ../scripts/check-contracts.sh
-```
-
-Worker 的 eBPF/perf 路径必须在 Linux 上验证；macOS Rust 构建只覆盖非 Linux 条件模块。修改 BPF 程序后运行 `worker/build-ebpf.sh`，需要支持 BPF target 的 clang。评分器是无框架依赖的纯领域服务；应用层通过端口连接数据库、邮件与 OAuth，便于将来添加 AI 分析而不改采集协议。
-
-## 当前限制
-
-- PostgreSQL 的指标默认保留 7 天。尚无时间分区、长期聚合和多节点容量压测。
-- 实时事件由单个后端进程广播；后端多副本需要共享事件总线和任务路由。
-- eBPF 的可用性依赖内核、BTF、权限和容器环境；探针失败时仍上报基础指标并标记能力。进程 Socket 字节只覆盖部分 send/recv 系统调用，不能当作完整网络归因；Pod 网络命名空间吞吐可用于服务级总量。
-- perf 依赖宿主机权限和符号质量；首版每台主机同一时间只运行一个任务。
-- 规则评分用于定位线索，不能替代受控基准测试。AI 根因分析、自动调优和多租户尚未交付。
-
-## 贡献与许可
-
-欢迎提交问题和改进。提交前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，尤其是契约同步、指标口径与独立构建要求。项目采用 [MIT License](LICENSE)。
+当前版本的限制包括：中心端以单实例为目标，原始指标默认保留 7 天；进程 Socket 计数只覆盖部分系统调用；逐线程真实栈深、业务 SLO 和 AI 根因分析尚未提供。指标缺失会显示为空值，具体口径见[指标字典](web/docs/metrics.md)。

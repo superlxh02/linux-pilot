@@ -121,6 +121,7 @@
 | `proc.pss_bytes`（B）与 `proc.pss_host_pct`（%） | 固定监控进程的按比例共享内存及其整机份额；比 RSS 更适合归因，读取较昂贵，仅对固定目标启用。 | `/proc/<pid>/smaps_rollup` |
 | `proc.private_clean_bytes`、`proc.private_dirty_bytes`、`proc.swap_bytes`（B） | 固定目标的私有内存及换出量；诊断堆内存与换页。 | `/proc/<pid>/smaps_rollup` |
 | `proc.stack_virtual_bytes`（B） | 进程主栈虚拟地址范围，不能当作已使用栈空间；真实逐线程栈深需要专门探针。 | `/proc/<pid>/status:VmStk` |
+| `proc.main_stack_rss_bytes`（B） | 主线程 `[stack]` 内已经驻留的物理页；不含其他线程的栈，也不是当前调用栈深。仅采集 CPU 热点前 5 名和固定监控对象。 | `/proc/<pid>/smaps` 中 `[stack]` 的 `Rss` |
 | `proc.open_fds`（个） | 固定目标当前打开的文件描述符数；跟踪句柄泄漏。 | `/proc/<pid>/fd` |
 | `proc.vmsize_bytes`（B） | 虚拟地址空间大小；与 RSS 分开看，不能当成实际内存占用。 | `/proc/<pid>/status` 的 VmSize |
 | `proc.threads`（个） | 进程线程数；发现线程膨胀。 | `/proc/<pid>/status` |
@@ -130,12 +131,17 @@
 | `proc.write_bytes_per_s`（B/秒） | 归因到进程的实际存储写入速率；可能与写回时点不同。 | `/proc/<pid>/io` 的 `write_bytes` |
 | `proc.read_syscalls_per_s`（次/秒） | 读类系统调用速率；识别小块频繁读取。 | `/proc/<pid>/io` 的 `syscr` |
 | `proc.write_syscalls_per_s`（次/秒） | 写类系统调用速率；识别小块频繁写入。 | `/proc/<pid>/io` 的 `syscw` |
-| `proc.voluntary_ctxt_per_s`（次/秒） | 进程主动让出 CPU 的频率；可能在等锁、I/O 或睡眠。 | `/proc/<pid>/status` |
-| `proc.involuntary_ctxt_per_s`（次/秒） | 进程被调度器抢占的频率；辅助判断 CPU 竞争。 | 同上 |
+| `proc.voluntary_ctxt_per_s`（次/秒） | **进程组长线程**主动让出 CPU 的频率；可能在等锁、I/O 或睡眠，不代表所有线程的合计。 | `/proc/<pid>/status` |
+| `proc.involuntary_ctxt_per_s`（次/秒） | **进程组长线程**被调度器抢占的频率；辅助判断 CPU 竞争。 | 同上 |
+| `proc.voluntary_ctxt_total`、`proc.involuntary_ctxt_total`（次） | 进程组长线程创建以来的主动/被动切换累计值；其他 TID 的计数由 `thread.*` 单独呈现。 | `/proc/<pid>/status` |
 | `proc.socket_rx_bytes_per_s`、`proc.socket_tx_bytes_per_s`（B/秒） | 固定目标的 `recvfrom/recvmsg/sendto/sendmsg` 成功返回字节数；仅是部分 socket 系统调用口径，不能等同完整进程网络流量或链路字节。 | eBPF syscall tracepoint |
 | `ebpf.socket_recv_calls_per_s`、`ebpf.socket_send_calls_per_s`（次/秒） | 节点级 socket syscall 探针实际命中次数；用于区分探针无样本与指定进程没有匹配数据。 | eBPF syscall tracepoint |
-| `thread.voluntary_ctxt_per_s`、`thread.involuntary_ctxt_per_s`（次/秒） | 固定目标每个 TID 的主动/被动上下文切换速率；用于找锁等待或竞争线程。 | `/proc/<pid>/task/<tid>/status` |
-| `thread.cpu_runtime_ms_per_s`、`thread.runqueue_wait_ms_per_s`、`thread.slices_per_s` | 每线程实际运行、排队等待与调度切片速率；等待时间不等同于一次切换的独立成本。 | `/proc/<pid>/task/<tid>/schedstat` |
+| `thread.voluntary_ctxt_total`、`thread.involuntary_ctxt_total`、`thread.context_switches_total`（次） | 每个 TID 创建以来的主动、被动及合计上下文切换次数；合计为前两项之和。 | `/proc/<pid>/task/<tid>/status` |
+| `thread.voluntary_ctxt_per_s`、`thread.involuntary_ctxt_per_s`、`thread.context_switches_per_s`（次/秒） | 采样窗口内每线程的切换速率；帮助定位频繁睡眠或抢占的线程。 | 上述累计计数的差分 |
+| `thread.cpu_runtime_total_ms`、`thread.runqueue_wait_total_ms`（ms） | 线程创建以来获得 CPU 的运行时间和处于可运行态但等待 CPU 的时间；后者不是执行 context switch 的内核开销。 | `/proc/<pid>/task/<tid>/schedstat` |
+| `thread.slices_total`（次） | 线程累计获得 CPU 的时间片次数，可与排队等待总量一起解释调度压力。 | 同上 |
+| `thread.cpu_runtime_ms_per_s`、`thread.runqueue_wait_ms_per_s`、`thread.slices_per_s` | 每线程实际运行、排队等待与时间片的采样窗口速率。 | 上述累计值的差分 |
+| `thread.runqueue_wait_per_slice_ms`（ms/片） | 采样窗口内排队等待时间增量除以时间片增量；不是单次上下文切换耗时。无时间片时缺失。 | `schedstat` 差分派生 |
 | `pod.net_rx_bytes_per_s`、`pod.net_tx_bytes_per_s`（B/秒） | Pod 共享网络命名空间的非 loopback 接口吞吐；不能按容器或进程拆分，也不含协议与链路层开销。 | `/proc/<pod-pid>/net/dev` |
 | `cgroup.cpu_usage_pct`（% 单核） | 工作负载 CPU 消耗；可超过 100%，用于容器资源归因。 | `cpu.stat:usage_usec` |
 | `cgroup.cpu_quota_cores`（核） | cgroup CPU 配额折算核心数；解释容器为何被限流。 | `cpu.max` |
@@ -155,6 +161,8 @@
 | `cgroup.psi.io.{some,full}.{avg10,avg60,avg300,total_us}`（% / μs） | 工作负载部分/全部任务等待 I/O 的压力。 | cgroup v2 的 `io.pressure` |
 
 [Linux cgroup v2 统计说明](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)；[进程 I/O 字段说明](https://man7.org/linux/man-pages/man5/proc_pid_io.5.html)。进程 `read_bytes/write_bytes` 与网卡字节数、系统调用字节数均是不同口径。
+
+线程明细最多读取每个目标的前 128 个 TID，默认覆盖 CPU 热点前 5 名和已固定监控对象；其他进程仍有进程级切换统计。`schedstat` 依赖内核启用相应统计功能，缺失时只显示从 `status` 取得的切换次数。Linux 4.5 起不再可靠标记每个 pthread 的 `[stack:tid]`，因此栈驻留指标仅声明主线程范围，不能代表所有线程的真实栈使用量。[内核 schedstat 字段说明](https://docs.kernel.org/scheduler/sched-stats.html)；[smaps 字段说明](https://man7.org/linux/man-pages/man5/proc_pid_smaps.5.html)。
 
 #### F. eBPF 深度指标（M2，能力探测后启用）
 
